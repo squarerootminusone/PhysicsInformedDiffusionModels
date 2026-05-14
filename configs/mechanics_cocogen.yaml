@@ -1,0 +1,16 @@
+# NOTE: CoCoGen correction steps (M_correction, N_correction) are not implemented
+# for mechanics in this codebase. Running main.py with this config will raise a ValueError.
+# Provided for completeness; use darcy_cocogen.yaml for the Darcy flow experiment.
+c_data: 1
+c_residual: 0
+c_ineq: 0
+lambda_opt: 0
+diff_steps: 100
+x0_estimation: 'mean'
+ddim_steps: 0
+residual_grad_guidance: False
+correction_mode: xt
+M_correction: 25
+N_correction: 50
+gov_eqs: mechanics
+fd_acc: 2
