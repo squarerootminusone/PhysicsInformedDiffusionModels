@@ -1,0 +1,28 @@
+Traceback (most recent call last):
+  File "/scratch/dstoyanova/PhysicsInformedDiffusionModels/sample_eval.py", line 117, in <module>
+    residuals = ResidualsDarcy(model=model, fd_acc=fd_acc, pixels_per_dim=pixels_per_dim,
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratch/dstoyanova/PhysicsInformedDiffusionModels/src/residuals_darcy.py", line 35, in __init__
+    self.grads = GradientsHelper(d0=d0, d1=d1, fd_acc = fd_acc, periodic=self.periodic, device=device)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratch/dstoyanova/PhysicsInformedDiffusionModels/src/grad_utils.py", line 184, in __init__
+    self.stencil_gradients = StencilGradients(d0=d0, d1=d1, fd_acc = fd_acc, periodic=periodic, device = device)
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratch/dstoyanova/PhysicsInformedDiffusionModels/src/grad_utils.py", line 156, in __init__
+    self.d_d1 = StencilGradientComputation(FinDiff(1, d1, 1, acc=fd_acc).stencil((99,99)).data, periodic, device)
+                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dstoyanova/miniconda3/envs/pidm/lib/python3.11/site-packages/findiff/compatible.py", line 106, in FinDiff
+    return diff_from_tuple(args)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dstoyanova/miniconda3/envs/pidm/lib/python3.11/site-packages/findiff/compatible.py", line 92, in diff_from_tuple
+    return Diff(axis, h, **kwargs) ** order
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dstoyanova/miniconda3/envs/pidm/lib/python3.11/site-packages/findiff/interface.py", line 62, in __init__
+    grid_axis = make_axis(axis, grid, periodic)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dstoyanova/miniconda3/envs/pidm/lib/python3.11/site-packages/findiff/grids.py", line 82, in make_axis
+    return EquidistantAxis(dim, spacing=config_or_axis, periodic=periodic)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dstoyanova/miniconda3/envs/pidm/lib/python3.11/site-packages/findiff/grids.py", line 22, in __init__
+    raise ValueError("Spacing must be > 0.")
+ValueError: Spacing must be > 0.
