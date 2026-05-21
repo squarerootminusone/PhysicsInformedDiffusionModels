@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --gpus-per-task=1
 #SBATCH --mem-per-cpu=7500M
-#SBATCH --time=20:00:00
+#SBATCH --time=1:00:00
 #SBATCH --output=slurm/logs/%x_%j.out
 #SBATCH --error=slurm/logs/%x_%j.err
 
@@ -38,5 +38,5 @@ PYEOF
 
 TMPSCRIPT=$(mktemp --suffix=_main.py)
 sed "s/name = 'run_1'/name = '${PIDM_RUN_NAME}'/" main.py > "$TMPSCRIPT"
-python "$TMPSCRIPT"
+PYTHONPATH="$WORKDIR" python "$TMPSCRIPT"
 rm -f "$TMPSCRIPT"

@@ -38,5 +38,5 @@ PYEOF
 
 TMPSCRIPT=$(mktemp --suffix=_main.py)
 sed "s/name = 'run_1'/name = '${PIDM_RUN_NAME}'/" main.py > "$TMPSCRIPT"
-python "$TMPSCRIPT"
+PYTHONPATH="$WORKDIR" python "$TMPSCRIPT"
 rm -f "$TMPSCRIPT"

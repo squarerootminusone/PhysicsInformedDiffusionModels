@@ -39,5 +39,5 @@ TMPSCRIPT=$(mktemp --suffix=_main_toy.py)
 sed -e "s/'wandb_track': True/'wandb_track': False/" \
     -e "s/'name': 'run_1'/'name': 'toy_${SLURM_JOB_ID}'/" \
     main_toy.py > "$TMPSCRIPT"
-python "$TMPSCRIPT"
+PYTHONPATH="$WORKDIR" python "$TMPSCRIPT"
 rm -f "$TMPSCRIPT"

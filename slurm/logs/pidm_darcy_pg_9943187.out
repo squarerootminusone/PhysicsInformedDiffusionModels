@@ -1,0 +1,3 @@
+CUDA available: True
+Torch CUDA: 12.1
+GPU: NVIDIA A100 80GB PCIe
