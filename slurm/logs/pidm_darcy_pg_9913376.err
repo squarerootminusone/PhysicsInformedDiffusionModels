@@ -1,6 +1,0 @@
-  0%|          | 0/300001 [00:00<?, ?it/s]training loss: 3.411e+00:   0%|          | 0/300001 [00:33<?, ?it/s]training loss: 3.411e+00:   0%|          | 1/300001 [04:18<21507:19:42, 258.09s/it]/cm/local/apps/slurm/var/spool/job9913376/slurm_script: line 29: 2618595 Killed                  python -c "
-import os
-code = open('main.py').read().replace(\"name = 'run_1'\", \"name = '\" + os.environ['PIDM_RUN_NAME'] + \"'\")
-exec(compile(code, 'main.py', 'exec'))
-"
-slurmstepd: error: Detected 1 oom-kill event(s) in StepId=9913376.batch. Some of your processes may have been killed by the cgroup out-of-memory handler.

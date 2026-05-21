@@ -1,4 +1,0 @@
-Traceback (most recent call last):
-  File "/tmp/tmp.BRlW0cyUiR_main.py", line 6, in <module>
-    from src.data_utils import *
-ModuleNotFoundError: No module named 'src'
