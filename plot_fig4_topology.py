@@ -29,20 +29,12 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm, Normalize, LinearSegmentedColormap
 from matplotlib.cm import ScalarMappable
 
-# ── channel layout from sample.py ──────────────────────────────────────────
-# output channels (sample_N.csv):  0=u_x, 1=u_y, 2=rho
-# cond channels (cond_channel_N.csv):
-#   0=vf_arr, 1=strain_energy_fem, 2=von_mises_fem
-#   3=disp_x_fem, 4=disp_y_fem, 5=E_field (ref design)
-#   6=BC_node_x, 7=BC_node_y, 8=load_x, 9=load_y
 
 BINARIZE_THRESHOLD = 0.5
 
-# Path to SolidsPy mesh files (no BCs — BCs are applied at runtime from cond channels)
 _PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 _NO_BC_FOLDER = os.path.join(_PROJECT_ROOT, 'data', 'mechanics', 'solidspy_k_no_BC') + os.sep
 
-# Lazily initialised; shared across all samples in one run
 _STIFFNESS = None
 
 
