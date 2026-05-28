@@ -15,7 +15,7 @@ The scalar R_MAE from residuals.csv is shown as a subtitle on each residual pane
 
 Usage:
     conda run -n pidm python plot_fig4_topology.py
-    conda run -n pidm python plot_fig4_topology.py --compare --output fig4_comparison.pdf
+    conda run -n pidm python plot_fig4_topology.py --compare --output fig4.pdf
     conda run -n pidm python plot_fig4_topology.py --results-dir results/reproduced/topology/PIDM/test_level_2 --n-samples 4 --output fig4_PIDM.pdf
 """
 
