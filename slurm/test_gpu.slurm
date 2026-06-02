@@ -1,19 +1,27 @@
 #!/bin/bash
 #SBATCH --job-name=test_gpu
-#SBATCH --partition=gpu-a100
+#SBATCH --partition=gpu-v100
+#SBATCH --account=Education-EEMCS-MSc-DSAIT
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --gpus-per-task=1
 #SBATCH --mem-per-cpu=4G
 #SBATCH --time=00:05:00
-#SBATCH --output=test_gpu.out
+#SBATCH --output=slurm/logs/%x_%j.out
+#SBATCH --error=slurm/logs/%x_%j.err
 
 set -euo pipefail
 
-module load cuda/12.1
+WORKDIR="/scratch/$USER/PhysicsInformedDiffusionModels"
+cd "$WORKDIR"
+mkdir -p slurm/logs
 
-source "$HOME/miniconda3/etc/profile.d/conda.sh"
-conda activate pidm
+module load 2024r1
+module load miniconda3
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate /scratch/$USER/conda_envs/pidm
+
+nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader
 
 python - <<'PYEOF'
 import torch
