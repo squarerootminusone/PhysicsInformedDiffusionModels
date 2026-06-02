@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=pidm_toy
-#SBATCH --partition=gpu-a100
+#SBATCH --partition=gpu-v100
+#SBATCH --account=Education-EEMCS-MSc-DSAIT
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --gpus-per-task=1
@@ -11,15 +12,15 @@
 
 set -euo pipefail
 
-WORKDIR="/scratch/dstoyanova/PhysicsInformedDiffusionModels"
+WORKDIR="/scratch/$USER/PhysicsInformedDiffusionModels"
 
 cd "$WORKDIR"
 mkdir -p slurm/logs
 
-module load cuda/12.1
-
-source "$HOME/miniconda3/etc/profile.d/conda.sh"
-conda activate pidm
+module load 2024r1
+module load miniconda3
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate /scratch/$USER/conda_envs/pidm
 
 python - <<'PYEOF'
 import torch
