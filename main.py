@@ -44,6 +44,7 @@ DEFAULTS = dict(
     test_eval_freq=500,
     sample_freq=20000,          # HPO: set >= train_iterations to skip the heavy GPU sampler
     final_sample=True,          # run one sample+checkpoint at the last iteration (HPO: False)
+    sample_eval_freq=None,      # if set, async p_sample_loop residual_mean_abs_samples every N steps
     ema_start=1000,
 )
 
@@ -133,6 +134,89 @@ class AsyncEvaluator:
         except queue.Full:
             self.q.put(None)
         self.thread.join(timeout=120)
+
+
+class SampleEvaluator:
+    """Async generative-sample eval (Darcy). Periodically runs p_sample_loop on a separate
+    uncompiled model copy + its own CUDA stream in a background thread, fed an EMA weight
+    snapshot, and logs residual_mean_abs_samples / residual_median_abs_samples -- the residual
+    on actually-generated samples (catches overfitting that the cheap forward eval misses).
+    Tracks the best (min) residual_mean_abs_samples for use as the study objective.
+
+    GPU-bound on a single card, so it overlaps but does not run for free; the bounded queue
+    skips a trigger only if a previous sampling pass is still running."""
+
+    def __init__(self, eval_model, eval_residuals, eval_diffusion, sample_shape, log_fn,
+                 use_dynamic_threshold=False, M_correction=0, N_correction=0, correction_mode='xt'):
+        self.eval_model = eval_model.eval()
+        self.eval_residuals = eval_residuals
+        self.diffusion = eval_diffusion
+        self.sample_shape = sample_shape
+        self.log_fn = log_fn
+        self.use_dynamic_threshold = use_dynamic_threshold
+        self.M_correction = M_correction
+        self.N_correction = N_correction
+        self.correction_mode = correction_mode
+        self.stream = torch.cuda.Stream() if torch.cuda.is_available() else None
+        self.q = queue.Queue(maxsize=1)
+        self.best = float('inf')
+        self.skipped = 0
+        self._exc = None
+        self.thread = threading.Thread(target=self._worker, daemon=True)
+        self.thread.start()
+
+    def submit(self, iteration, snapshot, ready_event):
+        try:
+            self.q.put_nowait((iteration, snapshot, ready_event))
+        except queue.Full:
+            self.skipped += 1
+
+    def _load_snapshot(self, snapshot):
+        clean = {k.replace('_orig_mod.', ''): v for k, v in snapshot.items()}
+        self.eval_model.load_state_dict(clean, strict=False)
+
+    def _worker(self):
+        try:
+            while True:
+                item = self.q.get()
+                if item is None:
+                    break
+                iteration, snapshot, ready_event = item
+                ctx = torch.cuda.stream(self.stream) if self.stream is not None else nullcontext()
+                with ctx:
+                    if ready_event is not None:
+                        ready_event.wait(self.stream)
+                    self._load_snapshot(snapshot)
+                    output = self.diffusion.p_sample_loop(
+                        None, self.sample_shape, save_output=True, surpress_noise=True,
+                        use_dynamic_threshold=self.use_dynamic_threshold,
+                        residual_func=self.eval_residuals, eval_residuals=True,
+                        return_optimizer=False, return_inequality=False,
+                        M_correction=self.M_correction, N_correction=self.N_correction,
+                        correction_mode=self.correction_mode)
+                    residual = output[1]['residual']
+                    residual = residual.abs().mean(dim=tuple(range(1, residual.ndim)))
+                if self.stream is not None:
+                    self.stream.synchronize()
+                arr = residual.detach().cpu().numpy()
+                mean_abs = float(np.nanmean(arr))
+                self.log_fn({'residual_mean_abs_samples': mean_abs,
+                             'residual_median_abs_samples': float(np.nanmedian(arr))}, step=iteration)
+                self.best = min(self.best, mean_abs)
+                print(f'sample-eval at iteration {iteration}: residual_mean_abs_samples={mean_abs:.3e}')
+        except Exception as e:
+            self._exc = e
+
+    def poll(self):
+        if self._exc is not None:
+            raise self._exc
+
+    def close(self):
+        try:
+            self.q.put_nowait(None)
+        except queue.Full:
+            self.q.put(None)
+        self.thread.join(timeout=600)
 
 
 def train(overrides=None, trial=None):
@@ -308,6 +392,20 @@ def train(overrides=None, trial=None):
         evaluator = AsyncEvaluator(eval_model, eval_residuals, eval_diffusion, dl_valid_async,
                                    loss_kwargs, log_fn, trial=trial)
 
+    # --- async generative-sample evaluator (residual_mean_abs_samples every sample_eval_freq) ---
+    sample_evaluator = None
+    if p['sample_eval_freq'] and gov_eqs == 'darcy':
+        s_model = build_model()
+        s_residuals = build_residuals(s_model)
+        s_diffusion = DenoisingDiffusion(diff_steps, device, residual_grad_guidance)
+        sample_shape = (no_samples, output_dim, pixels_per_dim, pixels_per_dim)
+        sample_evaluator = SampleEvaluator(s_model, s_residuals, s_diffusion, sample_shape, log_fn,
+                                           use_dynamic_threshold=use_dynamic_threshold,
+                                           M_correction=M_correction, N_correction=N_correction,
+                                           correction_mode=correction_mode)
+    elif p['sample_eval_freq']:
+        print('[sample-eval] only implemented for gov_eqs=="darcy"; disabled')
+
     def sample_and_checkpoint(iteration):
         """Heavy periodic sampler + checkpoint. Synchronous & EMA-swapped on the training
         model (only at sample_freq cadence). Unchanged from the original sample block."""
@@ -460,18 +558,21 @@ def train(overrides=None, trial=None):
             if iteration > ema_start:
                 ema.update(model)
 
-            # periodic validation eval -- async (never blocks training) or synchronous fallback
-            if iteration % test_eval_freq == 0 and exists(dl_valid):
-                if evaluator is not None:
+            # periodic eval -- validation (every test_eval_freq) + generative-sample
+            # (every sample_eval_freq); both async, sharing one EMA snapshot. Never blocks training.
+            val_fires = (iteration % test_eval_freq == 0) and exists(dl_valid)
+            sample_fires = (sample_evaluator is not None) and (iteration > 0) \
+                and (iteration % p['sample_eval_freq'] == 0)
+            if val_fires or sample_fires:
+                snapshot = ready_event = None
+                if (val_fires and evaluator is not None) or sample_fires:
                     snapshot = {k: v.detach().clone() for k, v in ema.shadow.items()}
-                    ready_event = None
                     if torch.cuda.is_available():
                         ready_event = torch.cuda.Event()
                         ready_event.record()                 # marks completion of the clones above
+                if val_fires and evaluator is not None:
                     evaluator.submit(iteration, snapshot, ready_event)
-                    if evaluator.poll() and optuna is not None:
-                        raise optuna.TrialPruned()
-                else:
+                elif val_fires:
                     model.eval()
                     ema.ema(residuals.model)
                     cur_test_batch = next(dl_valid).to(device, non_blocking=True)
@@ -490,10 +591,11 @@ def train(overrides=None, trial=None):
                     best_residual_test = min(best_residual_test, float(residual_loss_test))
                     ema.restore(residuals.model)
                     model.train()
-                    if trial is not None:
-                        trial.report(float(residual_loss_test), step=iteration)
-                        if trial.should_prune():
-                            raise optuna.TrialPruned()
+                if sample_fires:
+                    sample_evaluator.submit(iteration, snapshot, ready_event)
+                    sample_evaluator.poll()                  # re-raise any worker error
+                if evaluator is not None and evaluator.poll() and optuna is not None:
+                    raise optuna.TrialPruned()
 
             # heavy sampler + checkpoint (GPU-bound; gated by sample_freq; kept synchronous)
             if (iteration % sample_freq == 0) or (p['final_sample'] and iteration == train_iterations):
@@ -504,10 +606,19 @@ def train(overrides=None, trial=None):
             best_residual_test = min(best_residual_test, evaluator.best)
             if evaluator.skipped:
                 print(f'[async-eval] skipped {evaluator.skipped} eval(s) that overlapped a busy worker')
+        if sample_evaluator is not None:
+            sample_evaluator.close()
+            if sample_evaluator.skipped:
+                print(f'[sample-eval] skipped {sample_evaluator.skipped} sampling pass(es)')
         if wandb_track:
             import wandb
             wandb.finish()
 
+    # Objective: best generative-sample residual when sample-eval is on (overfitting-robust:
+    # this is the min over the periodic samples, i.e. best-checkpoint selection). Else the
+    # best validation residual.
+    if sample_evaluator is not None and sample_evaluator.best < float('inf'):
+        return sample_evaluator.best
     return best_residual_test
 
 

@@ -33,9 +33,10 @@ def build_objective(args):
             wandb_track=True,
             async_eval=True,
             train_iterations=args.iters,
-            sample_freq=10 ** 9,        # no periodic sampler
+            sample_freq=10 ** 9,        # no checkpoint/PNG sampler
             final_sample=False,         # no end-of-run sampler
             test_eval_freq=500,
+            sample_eval_freq=10000,     # async residual_mean_abs_samples -> objective (overfit-robust)
             c_residual=c_res,
         ), trial=trial)
 
