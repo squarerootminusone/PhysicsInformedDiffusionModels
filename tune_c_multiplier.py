@@ -1,22 +1,22 @@
 """Study B: one shared multiplier applied to BOTH configs at once.
 
 Each trial picks a single factor m in [0.1, 10] (log) and trains both configs with
-c_residual = center * m  (mean at 1e-3*m, DDIM at 1e-5*m). The trial score is the mean of
-the two residual_mean_abs_test values, so Optuna optimizes whether scaling the paper's two
-preset c_residual values up/down in lockstep helps. No pruning; full --iters per training.
+c_residual = center * m (mean at 1e-3*m, DDIM at 1e-5*m), each in its OWN isolated subprocess
+(cudagraphs safe). The trial score is the mean of the two best residual_mean_abs_samples.
 Every wandb run name contains "optuna-c".
 
   python tune_c_multiplier.py --study cres_mult --n-trials 10
 """
 import argparse
+import json
 import os
 import subprocess
+import sys
+import tempfile
 
 import optuna
 from optuna.samplers import TPESampler
 from optuna.pruners import NopPruner
-
-import main as pidm
 
 os.environ.setdefault(
     'WANDB_GIT_COMMIT',
@@ -30,24 +30,38 @@ CONFIGS = [
 ]
 
 
+def run_trial_subprocess(overrides):
+    fd, result_path = tempfile.mkstemp(suffix='.obj')
+    os.close(fd)
+    try:
+        subprocess.run([sys.executable, 'run_one_trial.py', json.dumps(overrides), result_path],
+                       check=True)
+        with open(result_path) as f:
+            return float(f.read().strip())
+    finally:
+        if os.path.exists(result_path):
+            os.unlink(result_path)
+
+
 def build_objective(args):
     def objective(trial):
         m = trial.suggest_float('c_residual_mult', 0.1, 10.0, log=True)
         scores = []
         for tag, cfg, center in CONFIGS:
-            s = pidm.train(dict(
+            overrides = dict(
                 name=f'optuna-c_B_t{trial.number}_{tag}',
                 config_path=cfg,
                 wandb_track=True,
                 async_eval=True,
-                bf16_train=True,          # bf16 training forward; eval stays fp32
+                bf16_train=True,
                 train_iterations=args.iters,
                 sample_freq=10 ** 9,
                 final_sample=False,
                 test_eval_freq=500,
-                sample_eval_freq=5000,    # async residual_mean_abs_samples -> objective
+                sample_eval_freq=5000,
                 c_residual=center * m,
-            ), trial=None)            # no per-config pruning; both run fully, then combine
+            )
+            s = run_trial_subprocess(overrides)
             scores.append(s)
             trial.set_user_attr(f'residual_{tag}', s)
         return sum(scores) / len(scores)
@@ -67,7 +81,7 @@ def main():
         study_name=args.study, storage=args.storage, load_if_exists=True,
         direction='minimize', sampler=TPESampler(), pruner=NopPruner(),
     )
-    study.optimize(build_objective(args), n_trials=args.n_trials)
+    study.optimize(build_objective(args), n_trials=args.n_trials, catch=(Exception,))
     print(f'[{args.study}] best mean residual:', study.best_value)
     print(f'[{args.study}] best params:', study.best_params)
 

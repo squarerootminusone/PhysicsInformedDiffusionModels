@@ -10,6 +10,7 @@ main.train({
     'config_path': 'configs/darcy_pidm_me.yaml',
     'train_iterations': 20000,
     'bf16_train': True,
+    'compile_mode': 'reduce-overhead',   # isolated single run -> cudagraphs safe
     'async_eval': True,
     'sample_eval_freq': 5000,
     'test_eval_freq': 500,
