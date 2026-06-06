@@ -390,11 +390,10 @@ def train(overrides=None, trial=None):
                         'train_iterations_resolved': train_iterations,
                         'model_dim_resolved': model_dim,
                         'num_params': num_params}
-        wandb.config.update(full_hparams, allow_val_change=True)
-        for _k in ('lr', 'c_residual', 'c_data', 'diff_steps', 'fd_acc', 'ema_decay',
-                   'grad_clip', 'bf16_train', 'compile_mode', 'sample_eval_freq'):
+        wandb.config.update(full_hparams, allow_val_change=True)   # often empty in this env...
+        for _k, _v in full_hparams.items():                        # ...so summary is the reliable store
             try:
-                wandb.run.summary[f'hp/{_k}'] = config.get(_k, p.get(_k))
+                wandb.run.summary[f'hp/{_k}'] = _v
             except Exception:
                 pass
         # Use an explicit 'iteration' x-axis so the async eval's (possibly out-of-order)
