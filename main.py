@@ -110,7 +110,7 @@ class AsyncEvaluator:
                 if self.stream is not None:
                     self.stream.synchronize()
                 residual_loss_test = float(residual_loss_test)
-                self.log_fn({'loss_test': float(loss_test),
+                self.log_fn({'loss_test': float(loss_test.detach()),
                              'loss_data_test': float(data_loss_test),
                              'residual_mean_abs_test': residual_loss_test}, step=iteration)
                 self.best = min(self.best, residual_loss_test)
