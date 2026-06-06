@@ -56,6 +56,7 @@ DEFAULTS = dict(
     test_eval_freq=500,
     sample_freq=20000,          # HPO: set >= train_iterations to skip the heavy GPU sampler
     final_sample=True,          # run one sample+checkpoint at the last iteration (HPO: False)
+    save_final_checkpoint=False, # save the final EMA model checkpoint (for later fp64 eval / reuse)
     sample_eval_freq=None,      # if set, async p_sample_loop residual_mean_abs_samples every N steps
     ema_start=1000,
 )
@@ -685,6 +686,15 @@ def train(overrides=None, trial=None):
             # heavy sampler + checkpoint (GPU-bound; gated by sample_freq; kept synchronous)
             if (iteration % sample_freq == 0) or (p['final_sample'] and iteration == train_iterations):
                 sample_and_checkpoint(iteration)
+
+        # final EMA checkpoint (so the trained model can be reloaded, e.g. for an fp64 eval)
+        if p['save_final_checkpoint']:
+            model.eval()
+            ema.ema(residuals.model)
+            save_model(config, model, train_iterations, output_save_dir)
+            ema.restore(residuals.model)
+            model.train()
+            print(f'saved final checkpoint: {output_save_dir}/model/checkpoint_{train_iterations}.pt', flush=True)
     finally:
         if evaluator is not None:
             evaluator.close()
