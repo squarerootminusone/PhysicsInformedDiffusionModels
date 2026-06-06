@@ -37,7 +37,7 @@ def build_objective(args):
             sample_freq=10 ** 9,        # no checkpoint/PNG sampler
             final_sample=False,         # no end-of-run sampler
             test_eval_freq=500,
-            sample_eval_freq=10000,     # async residual_mean_abs_samples -> objective (overfit-robust)
+            sample_eval_freq=5000,      # async residual_mean_abs_samples -> objective (overfit-robust)
             c_residual=c_res,
         ), trial=trial)
 
