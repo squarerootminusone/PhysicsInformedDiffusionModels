@@ -10,6 +10,9 @@ from src.unet_model import Unet3D
 from src.residuals_darcy import ResidualsDarcy
 from src.residuals_mechanics_K import ResidualsMechanics
 
+# --- opt3-no-bf16 recipe: full-fp32 matmuls (no TF32, no bf16 autocast) for maximum numerical precision ---
+torch.set_float32_matmul_precision('highest')
+
 name = 'run_1'
 wandb_track = False # set to True to track training with wandb
 
@@ -113,8 +116,8 @@ else:
 if use_double:
     torch.set_default_dtype(torch.float64)
 
-dl = cycle(DataLoader(ds, batch_size = train_batch_size, shuffle=False))
-dl_valid = cycle(DataLoader(ds_valid, batch_size = train_batch_size, shuffle=False))
+dl = cycle(DataLoader(ds, batch_size = train_batch_size, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True))
+dl_valid = cycle(DataLoader(ds_valid, batch_size = train_batch_size, shuffle=False, num_workers=2, pin_memory=True, persistent_workers=True))
 
 # diffusion utils
 diffusion_utils = DenoisingDiffusion(diff_steps, device, residual_grad_guidance)
@@ -128,6 +131,8 @@ else:
     raise ValueError('Unknown governing equations, cannot create model.')
 if load_model_flag:
     load_model(Path(load_path, 'model', 'checkpoint_' + str(load_model_step) + '.pt'), model)
+# --- opt3-no-bf16: torch.compile (Inductor + CUDA Graphs); after any load to avoid state_dict key-prefix mismatch ---
+model = torch.compile(model, mode='reduce-overhead')
 ema.register(model)
 num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f'Number of trainable parameters: {num_params}')
@@ -140,7 +145,7 @@ elif gov_eqs == 'mechanics':
 else:
     raise ValueError('Unknown residuals mode.')
 
-optimizer = optim.Adam(model.parameters(), lr=1.e-4)
+optimizer = optim.Adam(model.parameters(), lr=1.e-4, fused=True)  # opt3-no-bf16: fused Adam kernel
 
 if wandb_track:
     import wandb
@@ -155,12 +160,13 @@ os.makedirs(output_save_dir, exist_ok=True)
 
 pbar = tqdm(range(train_iterations+1))
 for iteration in pbar:
+    torch.compiler.cudagraph_mark_step_begin()  # opt3-no-bf16: safe CUDA Graph replay across steps
     model.train()
-    cur_batch = next(dl).to(device)
+    cur_batch = next(dl).to(device, non_blocking=True)
     loss, data_loss, residual_loss, ineq_loss, opt_loss = diffusion_utils.model_estimation_loss(
                 cur_batch, residual_func = residuals, c_data = c_data, c_residual = c_residual,
                 c_ineq = c_ineq, lambda_opt = lambda_opt)    
-    optimizer.zero_grad()
+    optimizer.zero_grad(set_to_none=True)
     loss.backward()
     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.)
     optimizer.step()        
@@ -182,7 +188,7 @@ for iteration in pbar:
     model.eval()
     ema.ema(residuals.model)
     if iteration % test_eval_freq == 0 and exists(dl_valid):
-        cur_test_batch = next(dl_valid).to(device)
+        cur_test_batch = next(dl_valid).to(device, non_blocking=True)
         # NOTE: we do not use torch.no_grad() since we may require residual gradient for classifier-free guidance
         loss_test, data_loss_test, residual_loss_test, ineq_loss_test, opt_loss_test = diffusion_utils.model_estimation_loss(
                     cur_test_batch, residual_func = residuals, c_data = c_data, c_residual = c_residual,
