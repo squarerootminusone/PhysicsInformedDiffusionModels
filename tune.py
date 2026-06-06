@@ -43,6 +43,7 @@ def objective(trial):
         async_eval=True,
         train_iterations=HPO_ITERATIONS,
         sample_freq=10 ** 9,        # disable the heavy GPU sampler during search
+        final_sample=False,         # ...including the end-of-run sample+checkpoint
         test_eval_freq=500,         # -> ~30 prune checkpoints per trial
         # --- search space (grounded in the actual knobs) ---
         lr=trial.suggest_float('lr', 1e-5, 5e-4, log=True),

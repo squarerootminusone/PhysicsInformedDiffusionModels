@@ -43,6 +43,7 @@ DEFAULTS = dict(
     # --- evaluation cadence ---
     test_eval_freq=500,
     sample_freq=20000,          # HPO: set >= train_iterations to skip the heavy GPU sampler
+    final_sample=True,          # run one sample+checkpoint at the last iteration (HPO: False)
     ema_start=1000,
 )
 
@@ -495,7 +496,7 @@ def train(overrides=None, trial=None):
                             raise optuna.TrialPruned()
 
             # heavy sampler + checkpoint (GPU-bound; gated by sample_freq; kept synchronous)
-            if (iteration % sample_freq == 0) or (iteration == train_iterations):
+            if (iteration % sample_freq == 0) or (p['final_sample'] and iteration == train_iterations):
                 sample_and_checkpoint(iteration)
     finally:
         if evaluator is not None:
