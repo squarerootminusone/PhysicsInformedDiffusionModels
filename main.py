@@ -35,6 +35,13 @@ DEFAULTS = dict(
     async_eval=True,            # run the periodic validation eval off the training critical path
     # --- tunable hyperparameters ---
     lr=1.0e-4,
+    lr_schedule=None,           # None or 'plateau': ReduceLROnPlateau on a rolling loss average
+    lr_plateau_factor=0.5,      # lr *= factor when the rolling loss plateaus
+    lr_plateau_patience=5,      # scheduler steps (of lr_sched_freq each) w/o improvement before decay
+    lr_plateau_threshold=1e-3,  # relative-improvement threshold for "no improvement"
+    lr_min=1e-6,
+    lr_window=50,               # rolling average over this many logged-loss samples
+    lr_sched_freq=500,          # iterations between scheduler.step(rolling_avg)
     grad_clip=1.0,
     ema_decay=0.99,
     c_data=None,                # None -> from yaml config
@@ -378,6 +385,17 @@ def train(overrides=None, trial=None):
     residuals = build_residuals(model)
     optimizer = optim.Adam(model.parameters(), lr=p['lr'], fused=True)  # opt3-no-bf16: fused Adam
 
+    # optional LR schedule: ReduceLROnPlateau driven by a rolling average of the training loss
+    scheduler = None
+    loss_window = None
+    if p['lr_schedule'] == 'plateau':
+        from collections import deque
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=p['lr_plateau_factor'],
+            patience=p['lr_plateau_patience'], threshold=p['lr_plateau_threshold'],
+            min_lr=p['lr_min'])
+        loss_window = deque(maxlen=p['lr_window'])
+
     if wandb_track:
         import wandb
         wandb.init(project='pi_diffusion', name=name)
@@ -585,14 +603,23 @@ def train(overrides=None, trial=None):
 
             # logging
             if iteration % log_freq == 0:
-                pbar.set_description(f'training loss: {loss.item():.3e}')
-                log_fn({'loss': loss.item()}, step=iteration)
+                loss_val = loss.item()
+                pbar.set_description(f'training loss: {loss_val:.3e}')
+                log_fn({'loss': loss_val}, step=iteration)
                 log_fn({'loss_data': data_loss}, step=iteration)
                 log_fn({'residual_mean_abs': residual_loss}, step=iteration)
                 if c_ineq > 0:
                     log_fn({'loss_inequality': ineq_loss}, step=iteration)
                 if lambda_opt > 0:
                     log_fn({'loss_optimization': opt_loss}, step=iteration)
+                if scheduler is not None:
+                    loss_window.append(loss_val)
+
+            # LR plateau schedule driven by the rolling loss average
+            if scheduler is not None and iteration % p['lr_sched_freq'] == 0 and loss_window:
+                rolling = sum(loss_window) / len(loss_window)
+                scheduler.step(rolling)
+                log_fn({'lr': optimizer.param_groups[0]['lr'], 'loss_rolling': rolling}, step=iteration)
 
             # ema update
             if iteration > ema_start:
