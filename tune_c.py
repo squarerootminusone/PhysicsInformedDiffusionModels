@@ -32,6 +32,7 @@ def build_objective(args):
             config_path=args.config,
             wandb_track=True,
             async_eval=True,
+            bf16_train=True,            # bf16 training forward; eval stays fp32
             train_iterations=args.iters,
             sample_freq=10 ** 9,        # no checkpoint/PNG sampler
             final_sample=False,         # no end-of-run sampler
@@ -51,7 +52,7 @@ def main():
     ap.add_argument('--study', required=True)
     ap.add_argument('--storage', default='sqlite:///pidm_optuna.db')
     ap.add_argument('--n-trials', type=int, default=5)
-    ap.add_argument('--iters', type=int, default=50000)
+    ap.add_argument('--iters', type=int, default=35000)
     args = ap.parse_args()
 
     study = optuna.create_study(
