@@ -614,12 +614,13 @@ def train(overrides=None, trial=None):
                     log_fn({'loss_optimization': opt_loss}, step=iteration)
                 if scheduler is not None:
                     loss_window.append(loss_val)
+                    log_fn({'lr': optimizer.param_groups[0]['lr']}, step=iteration)  # dense for plotting
 
             # LR plateau schedule driven by the rolling loss average
             if scheduler is not None and iteration % p['lr_sched_freq'] == 0 and loss_window:
                 rolling = sum(loss_window) / len(loss_window)
                 scheduler.step(rolling)
-                log_fn({'lr': optimizer.param_groups[0]['lr'], 'loss_rolling': rolling}, step=iteration)
+                log_fn({'loss_rolling': rolling}, step=iteration)
 
             # ema update
             if iteration > ema_start:
