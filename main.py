@@ -380,10 +380,23 @@ def train(overrides=None, trial=None):
 
     if wandb_track:
         import wandb
-        wandb.init(project='pi_diffusion', name=name,
-                   config={k: p[k] for k in ('lr', 'grad_clip', 'ema_decay', 'c_data',
-                                             'c_residual', 'diff_steps', 'fd_acc', 'model_dim',
-                                             'batch_size', 'train_iterations')})
+        wandb.init(project='pi_diffusion', name=name)
+        # Log ALL hyperparameters. `config={...}` passed to init was not persisting (empty
+        # config in the run), so set it explicitly via config.update on the resolved params:
+        # p (run/hyperparams) + config (yaml-sourced, with the actually-used c_residual etc.)
+        # + derived values. Also mirror the key tunables into summary as a recovery backstop.
+        full_hparams = {**p, **config,
+                        'train_batch_size': train_batch_size,
+                        'train_iterations_resolved': train_iterations,
+                        'model_dim_resolved': model_dim,
+                        'num_params': num_params}
+        wandb.config.update(full_hparams, allow_val_change=True)
+        for _k in ('lr', 'c_residual', 'c_data', 'diff_steps', 'fd_acc', 'ema_decay',
+                   'grad_clip', 'bf16_train', 'compile_mode', 'sample_eval_freq'):
+            try:
+                wandb.run.summary[f'hp/{_k}'] = config.get(_k, p.get(_k))
+            except Exception:
+                pass
         # Use an explicit 'iteration' x-axis so the async eval's (possibly out-of-order)
         # logs are not dropped by wandb's monotonic internal step counter.
         wandb.define_metric('iteration')
