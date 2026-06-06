@@ -45,7 +45,7 @@ def build_objective(args):
                 sample_freq=10 ** 9,
                 final_sample=False,
                 test_eval_freq=500,
-                sample_eval_freq=10000,   # async residual_mean_abs_samples -> objective
+                sample_eval_freq=5000,    # async residual_mean_abs_samples -> objective
                 c_residual=center * m,
             ), trial=None)            # no per-config pruning; both run fully, then combine
             scores.append(s)
