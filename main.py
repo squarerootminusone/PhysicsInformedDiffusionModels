@@ -28,6 +28,9 @@ DEFAULTS = dict(
     config_path='model.yaml',
     wandb_track=False,
     compile_model=True,
+    compile_mode='default',     # 'default' (Inductor, no cudagraphs) is safe across many trials;
+                                # 'reduce-overhead' (cudagraphs) is faster but breaks on the 2nd
+                                # compiled model in one process (RNG offset / graph-capture errors)
     bf16_train=False,           # wrap the training forward in bf16 autocast (eval stays fp32)
     async_eval=True,            # run the periodic validation eval off the training critical path
     # --- tunable hyperparameters ---
@@ -366,7 +369,7 @@ def train(overrides=None, trial=None):
     model = build_model()
     # --- opt3-no-bf16: torch.compile (Inductor + CUDA Graphs) ---
     if p['compile_model']:
-        model = torch.compile(model, mode='reduce-overhead')
+        model = torch.compile(model, mode=p['compile_mode'])
     ema.register(model)
     num_params = sum(pp.numel() for pp in model.parameters() if pp.requires_grad)
     print(f'Number of trainable parameters: {num_params}')
