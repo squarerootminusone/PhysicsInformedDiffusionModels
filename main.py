@@ -369,8 +369,13 @@ def train(overrides=None, trial=None):
         wandb.define_metric('iteration')
         wandb.define_metric('*', step_metric='iteration')
 
+        # wandb.log is NOT safe to call concurrently from multiple threads; the main loop and
+        # the async eval workers all log, so serialize every call behind one lock.
+        _wandb_lock = threading.Lock()
+
         def log_fn(data, step):
-            wandb.log({**data, 'iteration': step})
+            with _wandb_lock:
+                wandb.log({**data, 'iteration': step})
     else:
         def log_fn(data, step=None):
             pass
