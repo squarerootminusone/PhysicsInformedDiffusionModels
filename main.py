@@ -28,6 +28,7 @@ DEFAULTS = dict(
     config_path='model.yaml',
     wandb_track=False,
     compile_model=True,
+    bf16_train=False,           # wrap the training forward in bf16 autocast (eval stays fp32)
     async_eval=True,            # run the periodic validation eval off the training critical path
     # --- tunable hyperparameters ---
     lr=1.0e-4,
@@ -105,9 +106,11 @@ class AsyncEvaluator:
                         ready_event.wait(self.stream)       # order after the training-thread clone
                     self._load_snapshot(snapshot)
                     batch = next(self.dl_valid).to(device, non_blocking=True)
-                    loss_test, data_loss_test, residual_loss_test, _, _ = \
-                        self.diffusion.model_estimation_loss(
-                            batch, residual_func=self.eval_residuals, **self.loss_kwargs)
+                    # fp32 eval: residual stencils must not be cast to bf16
+                    with torch.autocast(device_type='cuda', enabled=False):
+                        loss_test, data_loss_test, residual_loss_test, _, _ = \
+                            self.diffusion.model_estimation_loss(
+                                batch, residual_func=self.eval_residuals, **self.loss_kwargs)
                 if self.stream is not None:
                     self.stream.synchronize()
                 residual_loss_test = float(residual_loss_test)
@@ -187,15 +190,17 @@ class SampleEvaluator:
                     if ready_event is not None:
                         ready_event.wait(self.stream)
                     self._load_snapshot(snapshot)
-                    output = self.diffusion.p_sample_loop(
-                        None, self.sample_shape, save_output=True, surpress_noise=True,
-                        use_dynamic_threshold=self.use_dynamic_threshold,
-                        residual_func=self.eval_residuals, eval_residuals=True,
-                        return_optimizer=False, return_inequality=False,
-                        M_correction=self.M_correction, N_correction=self.N_correction,
-                        correction_mode=self.correction_mode)
-                    residual = output[1]['residual']
-                    residual = residual.abs().mean(dim=tuple(range(1, residual.ndim)))
+                    # fp32 sampling + residual: bf16 stencils would inflate the metric
+                    with torch.autocast(device_type='cuda', enabled=False):
+                        output = self.diffusion.p_sample_loop(
+                            None, self.sample_shape, save_output=True, surpress_noise=True,
+                            use_dynamic_threshold=self.use_dynamic_threshold,
+                            residual_func=self.eval_residuals, eval_residuals=True,
+                            return_optimizer=False, return_inequality=False,
+                            M_correction=self.M_correction, N_correction=self.N_correction,
+                            correction_mode=self.correction_mode)
+                        residual = output[1]['residual']
+                        residual = residual.abs().mean(dim=tuple(range(1, residual.ndim)))
                 if self.stream is not None:
                     self.stream.synchronize()
                 arr = residual.detach().cpu().numpy()
@@ -538,11 +543,14 @@ def train(overrides=None, trial=None):
     try:
         pbar = tqdm(range(train_iterations + 1))
         for iteration in pbar:
-            torch.compiler.cudagraph_mark_step_begin()  # opt3-no-bf16: safe CUDA Graph replay
+            torch.compiler.cudagraph_mark_step_begin()  # safe CUDA Graph replay
             model.train()
             cur_batch = next(dl).to(device, non_blocking=True)
-            loss, data_loss, residual_loss, ineq_loss, opt_loss = diffusion_utils.model_estimation_loss(
-                cur_batch, residual_func=residuals, **loss_kwargs)
+            train_ctx = torch.autocast(device_type='cuda', dtype=torch.bfloat16) \
+                if p['bf16_train'] else nullcontext()
+            with train_ctx:
+                loss, data_loss, residual_loss, ineq_loss, opt_loss = diffusion_utils.model_estimation_loss(
+                    cur_batch, residual_func=residuals, **loss_kwargs)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), p['grad_clip'])
