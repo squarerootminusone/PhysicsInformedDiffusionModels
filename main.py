@@ -64,19 +64,18 @@ class AsyncEvaluator:
     """
 
     def __init__(self, eval_model, eval_residuals, eval_diffusion, dl_valid,
-                 loss_kwargs, log_fn, trial=None):
+                 loss_kwargs, log_fn):
         self.eval_model = eval_model.eval()
         self.eval_residuals = eval_residuals
         self.diffusion = eval_diffusion
         self.dl_valid = dl_valid
         self.loss_kwargs = loss_kwargs
         self.log_fn = log_fn
-        self.trial = trial
         self.stream = torch.cuda.Stream() if torch.cuda.is_available() else None
         self.q = queue.Queue(maxsize=1)     # at most one eval in flight -> training never waits
+        self.results = queue.Queue()        # worker -> main thread (worker never touches wandb/Optuna)
         self.best = float('inf')
         self.skipped = 0
-        self._prune = False
         self._exc = None
         self.thread = threading.Thread(target=self._worker, daemon=True)
         self.thread.start()
@@ -86,7 +85,7 @@ class AsyncEvaluator:
         try:
             self.q.put_nowait((iteration, snapshot, ready_event))
         except queue.Full:
-            self.skipped += 1               # keep training non-blocking; a later eval still prunes
+            self.skipped += 1               # keep training non-blocking; a later eval still runs
 
     def _load_snapshot(self, snapshot):
         # EMA shadow keys carry torch.compile's '_orig_mod.' prefix; the eval model is uncompiled.
@@ -114,22 +113,25 @@ class AsyncEvaluator:
                 if self.stream is not None:
                     self.stream.synchronize()
                 residual_loss_test = float(residual_loss_test)
-                self.log_fn({'loss_test': float(loss_test.detach()),
-                             'loss_data_test': float(data_loss_test),
-                             'residual_mean_abs_test': residual_loss_test}, step=iteration)
-                self.best = min(self.best, residual_loss_test)
-                if self.trial is not None:
-                    self.trial.report(residual_loss_test, step=iteration)
-                    if self.trial.should_prune():
-                        self._prune = True
-        except Exception as e:        # surface to the training thread via poll()
+                # compute-only: hand results to the main thread; never log/report from here
+                self.results.put((iteration, {'loss_test': float(loss_test.detach()),
+                                              'loss_data_test': float(data_loss_test),
+                                              'residual_mean_abs_test': residual_loss_test},
+                                  residual_loss_test))
+        except Exception as e:        # surface to the main thread via drain()
             self._exc = e
 
-    def poll(self):
-        """Called from the training thread. Re-raises worker errors; returns True if pruning."""
+    def drain(self):
+        """Called from the MAIN thread: log queued eval results, update best, re-raise errors."""
         if self._exc is not None:
             raise self._exc
-        return self._prune
+        while True:
+            try:
+                iteration, data, rlt = self.results.get_nowait()
+            except queue.Empty:
+                break
+            self.log_fn(data, step=iteration)
+            self.best = min(self.best, rlt)
 
     def close(self):
         try:
@@ -162,6 +164,7 @@ class SampleEvaluator:
         self.correction_mode = correction_mode
         self.stream = torch.cuda.Stream() if torch.cuda.is_available() else None
         self.q = queue.Queue(maxsize=1)
+        self.results = queue.Queue()        # worker -> main thread (worker never touches wandb)
         self.best = float('inf')
         self.skipped = 0
         self._exc = None
@@ -205,16 +208,25 @@ class SampleEvaluator:
                     self.stream.synchronize()
                 arr = residual.detach().cpu().numpy()
                 mean_abs = float(np.nanmean(arr))
-                self.log_fn({'residual_mean_abs_samples': mean_abs,
-                             'residual_median_abs_samples': float(np.nanmedian(arr))}, step=iteration)
-                self.best = min(self.best, mean_abs)
-                print(f'sample-eval at iteration {iteration}: residual_mean_abs_samples={mean_abs:.3e}')
+                # compute-only: hand results to the main thread; never log from here
+                self.results.put((iteration, {'residual_mean_abs_samples': mean_abs,
+                                              'residual_median_abs_samples': float(np.nanmedian(arr))},
+                                  mean_abs))
         except Exception as e:
             self._exc = e
 
-    def poll(self):
+    def drain(self):
+        """Called from the MAIN thread: log queued sample-eval results, update best, re-raise errors."""
         if self._exc is not None:
             raise self._exc
+        while True:
+            try:
+                iteration, data, mean_abs = self.results.get_nowait()
+            except queue.Empty:
+                break
+            self.log_fn(data, step=iteration)
+            self.best = min(self.best, mean_abs)
+            print(f'sample-eval at iteration {iteration}: residual_mean_abs_samples={mean_abs:.3e}')
 
     def close(self):
         try:
@@ -400,7 +412,7 @@ def train(overrides=None, trial=None):
         dl_valid_async = cycle(DataLoader(ds_valid, batch_size=train_batch_size, shuffle=False,
                                           num_workers=1, pin_memory=True, persistent_workers=True))
         evaluator = AsyncEvaluator(eval_model, eval_residuals, eval_diffusion, dl_valid_async,
-                                   loss_kwargs, log_fn, trial=trial)
+                                   loss_kwargs, log_fn)
 
     # --- async generative-sample evaluator (residual_mean_abs_samples every sample_eval_freq) ---
     sample_evaluator = None
@@ -571,6 +583,12 @@ def train(overrides=None, trial=None):
             if iteration > ema_start:
                 ema.update(model)
 
+            # drain async eval results in the MAIN thread (all wandb/best handled here, not in workers)
+            if evaluator is not None:
+                evaluator.drain()
+            if sample_evaluator is not None:
+                sample_evaluator.drain()
+
             # periodic eval -- validation (every test_eval_freq) + generative-sample
             # (every sample_eval_freq); both async, sharing one EMA snapshot. Never blocks training.
             val_fires = (iteration % test_eval_freq == 0) and exists(dl_valid)
@@ -606,9 +624,6 @@ def train(overrides=None, trial=None):
                     model.train()
                 if sample_fires:
                     sample_evaluator.submit(iteration, snapshot, ready_event)
-                    sample_evaluator.poll()                  # re-raise any worker error
-                if evaluator is not None and evaluator.poll() and optuna is not None:
-                    raise optuna.TrialPruned()
 
             # heavy sampler + checkpoint (GPU-bound; gated by sample_freq; kept synchronous)
             if (iteration % sample_freq == 0) or (p['final_sample'] and iteration == train_iterations):
@@ -616,11 +631,13 @@ def train(overrides=None, trial=None):
     finally:
         if evaluator is not None:
             evaluator.close()
+            evaluator.drain()                  # log any results the worker produced before exit
             best_residual_test = min(best_residual_test, evaluator.best)
             if evaluator.skipped:
                 print(f'[async-eval] skipped {evaluator.skipped} eval(s) that overlapped a busy worker')
         if sample_evaluator is not None:
             sample_evaluator.close()
+            sample_evaluator.drain()
             if sample_evaluator.skipped:
                 print(f'[sample-eval] skipped {sample_evaluator.skipped} sampling pass(es)')
         if wandb_track:
