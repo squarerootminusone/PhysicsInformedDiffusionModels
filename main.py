@@ -50,6 +50,7 @@ DEFAULTS = dict(
     fd_acc=None,                # None -> from yaml config
     model_dim=None,             # None -> per-gov_eqs default (darcy 32 / mechanics 128)
     batch_size=None,            # None -> per-gov_eqs default
+    batch_schedule=None,        # optional {iter: batch_size} ramp (e.g. {0:64, 22000:128, 35000:256})
     train_iterations=None,      # None -> per-gov_eqs default (HPO callers pass a small value)
     # --- evaluation cadence ---
     test_eval_freq=500,
@@ -342,8 +343,15 @@ def train(overrides=None, trial=None):
     if use_double:
         torch.set_default_dtype(torch.float64)
 
-    dl = cycle(DataLoader(ds, batch_size=train_batch_size, shuffle=False,
-                          num_workers=4, pin_memory=True, persistent_workers=True))
+    # optional batch-size ramp: {iter: batch_size} (JSON may stringify keys -> normalize to int)
+    batch_schedule = {int(k): v for k, v in (p['batch_schedule'] or {}).items()}
+
+    def make_train_dl(bs):
+        return cycle(DataLoader(ds, batch_size=bs, shuffle=False,
+                                num_workers=4, pin_memory=True, persistent_workers=True))
+
+    cur_bs = batch_schedule.get(0, train_batch_size)
+    dl = make_train_dl(cur_bs)
     dl_valid = cycle(DataLoader(ds_valid, batch_size=train_batch_size, shuffle=False,
                                 num_workers=2, pin_memory=True, persistent_workers=True))
 
@@ -588,6 +596,10 @@ def train(overrides=None, trial=None):
     try:
         pbar = tqdm(range(train_iterations + 1))
         for iteration in pbar:
+            if iteration in batch_schedule and iteration > 0:
+                cur_bs = batch_schedule[iteration]
+                dl = make_train_dl(cur_bs)   # new shape -> one-time torch.compile recapture
+                print(f'batch_size -> {cur_bs} at iter {iteration}', flush=True)
             torch.compiler.cudagraph_mark_step_begin()  # safe CUDA Graph replay
             model.train()
             cur_batch = next(dl).to(device, non_blocking=True)
@@ -615,6 +627,8 @@ def train(overrides=None, trial=None):
                 if scheduler is not None:
                     loss_window.append(loss_val)
                     log_fn({'lr': optimizer.param_groups[0]['lr']}, step=iteration)  # dense for plotting
+                if batch_schedule:
+                    log_fn({'batch_size': cur_bs}, step=iteration)
 
             # LR plateau schedule driven by the rolling loss average
             if scheduler is not None and iteration % p['lr_sched_freq'] == 0 and loss_window:
