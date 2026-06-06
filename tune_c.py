@@ -1,20 +1,21 @@
 """Study A: single-parameter c_residual search for ONE config.
 
-Tunes c_residual log-uniformly in [center/10, center*10], no pruning (each trial runs the
-full --iters steps), residual_mean_abs_test as the objective. Every wandb run name contains
-"optuna-c". SQLite storage -> resumable.
+Each trial trains in an ISOLATED subprocess (run_one_trial.py) so cudagraphs are safe across
+the many trials. Tunes c_residual log-uniformly in [center/10, center*10], no pruning, with
+the best residual_mean_abs_samples as the objective. Every wandb run name contains "optuna-c".
 
   python tune_c.py --config configs/darcy_pidm_me.yaml --center 1e-3 --tag me --study cres_me --n-trials 5
 """
 import argparse
+import json
 import os
 import subprocess
+import sys
+import tempfile
 
 import optuna
 from optuna.samplers import TPESampler
 from optuna.pruners import NopPruner
-
-import main as pidm
 
 os.environ.setdefault(
     'WANDB_GIT_COMMIT',
@@ -22,24 +23,39 @@ os.environ.setdefault(
 )
 
 
+def run_trial_subprocess(overrides):
+    """Run one train() in a fresh process; return its objective. Inherits env (WANDB_*)."""
+    fd, result_path = tempfile.mkstemp(suffix='.obj')
+    os.close(fd)
+    try:
+        subprocess.run([sys.executable, 'run_one_trial.py', json.dumps(overrides), result_path],
+                       check=True)
+        with open(result_path) as f:
+            return float(f.read().strip())
+    finally:
+        if os.path.exists(result_path):
+            os.unlink(result_path)
+
+
 def build_objective(args):
     lo, hi = args.center / 10.0, args.center * 10.0
 
     def objective(trial):
         c_res = trial.suggest_float('c_residual', lo, hi, log=True)
-        return pidm.train(dict(
+        overrides = dict(
             name=f'optuna-c_{args.tag}_t{trial.number}',
             config_path=args.config,
             wandb_track=True,
             async_eval=True,
-            bf16_train=True,            # bf16 training forward; eval stays fp32
+            bf16_train=True,
             train_iterations=args.iters,
-            sample_freq=10 ** 9,        # no checkpoint/PNG sampler
-            final_sample=False,         # no end-of-run sampler
+            sample_freq=10 ** 9,
+            final_sample=False,
             test_eval_freq=500,
-            sample_eval_freq=5000,      # async residual_mean_abs_samples -> objective (overfit-robust)
+            sample_eval_freq=5000,
             c_residual=c_res,
-        ), trial=trial)
+        )
+        return run_trial_subprocess(overrides)
 
     return objective
 
@@ -48,7 +64,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--config', required=True)
     ap.add_argument('--center', type=float, required=True)
-    ap.add_argument('--tag', required=True)          # short label for wandb names, e.g. 'me'/'se'
+    ap.add_argument('--tag', required=True)
     ap.add_argument('--study', required=True)
     ap.add_argument('--storage', default='sqlite:///pidm_optuna.db')
     ap.add_argument('--n-trials', type=int, default=5)
@@ -59,8 +75,9 @@ def main():
         study_name=args.study, storage=args.storage, load_if_exists=True,
         direction='minimize', sampler=TPESampler(), pruner=NopPruner(),
     )
-    study.optimize(build_objective(args), n_trials=args.n_trials)
-    print(f'[{args.study}] best value (residual_mean_abs_test):', study.best_value)
+    # catch: a crashed trial subprocess marks that trial failed but the study continues
+    study.optimize(build_objective(args), n_trials=args.n_trials, catch=(Exception,))
+    print(f'[{args.study}] best value (residual_mean_abs_samples):', study.best_value)
     print(f'[{args.study}] best params:', study.best_params)
 
 
