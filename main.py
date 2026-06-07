@@ -342,6 +342,7 @@ def train(overrides=None, trial=None):
     train_batch_size = p['batch_size'] or default_batch_size
     train_iterations = p['train_iterations'] or default_iterations
     model_dim = p['model_dim'] or default_dim
+    config['model_dim'] = model_dim   # record in the saved model.yaml so eval can rebuild correctly
 
     if use_double:
         torch.set_default_dtype(torch.float64)
