@@ -28,7 +28,7 @@ state = {k.replace('_orig_mod.', ''): v for k, v in state.items()}   # strip tor
 def eval_precision(dtype):
     torch.set_default_dtype(dtype)                                    # schedule/noise/stencils in dtype
     torch.manual_seed(0)                                             # same seed both runs
-    m = Unet3D(dim=32, channels=2, sigmoid_last_channel=False).to(device).to(dtype)
+    m = Unet3D(dim=cfg.get('model_dim', 32), channels=2, sigmoid_last_channel=False).to(device).to(dtype)
     m.load_state_dict({k: v.to(dtype) for k, v in state.items()}, strict=False)
     m.eval()
     res = ResidualsDarcy(model=m, fd_acc=(FD_ACC if FD_ACC is not None else cfg['fd_acc']),
