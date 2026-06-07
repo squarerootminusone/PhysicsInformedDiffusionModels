@@ -39,7 +39,7 @@ for i in range(5):
     ckpt = f'trained_models/lrdecay_r{i}/model/checkpoint_{ITERS}.pt'
     print(f'--- eval r{i} ---', flush=True)
     try:
-        subprocess.run([sys.executable, 'eval_fp64.py', ckpt, 'configs/darcy_pidm_me.yaml', '16'],
+        subprocess.run([sys.executable, 'eval_fp64.py', ckpt, 'configs/darcy_pidm_me.yaml', '64'],
                        check=True)
     except Exception as e:
         print(f'eval r{i} FAILED: {e}', flush=True)
