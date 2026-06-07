@@ -192,11 +192,27 @@ class ResidualsMechanics:
         else:
             # model requires 10 channels (fields, vf, strain_energy_dens, von-mises, 4 boundary conditions)
             noisy_in_red = torch.cat((noisy_in_red, bcs_red), dim=1)
-            if self.use_ddim_x0:
-                x0_pred, model_out = ddim_func(noisy_in_red, time, self.model, noisy_in.shape, self.ddim_steps, 0., gov_eqs = 'mechanics')
+            # opt12: scope bf16 autocast to *only* the model forward (and ddim_func's internal model calls).
+            # Everything outside this block (K-assembly, BC masking, einsum, residual) stays in fp32.
+            # Setting cache_enabled=False keeps autocast safely no-op'd when called inside a no_grad eval.
+            _opt12_bf16 = os.environ.get('OPT12_BF16', '') == '1'
+            if _opt12_bf16:
+                with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                    if self.use_ddim_x0:
+                        x0_pred, model_out = ddim_func(noisy_in_red, time, self.model, noisy_in.shape, self.ddim_steps, 0., gov_eqs = 'mechanics')
+                    else:
+                        x0_pred = self.model(noisy_in_red, time)
+                        model_out = x0_pred
+                # Cast back to fp32 at the boundary so residual K-assembly runs in fp32
+                x0_pred = x0_pred.float()
+                if model_out is not x0_pred:
+                    model_out = model_out.float()
             else:
-                x0_pred = self.model(noisy_in_red, time)
-                model_out = x0_pred
+                if self.use_ddim_x0:
+                    x0_pred, model_out = ddim_func(noisy_in_red, time, self.model, noisy_in.shape, self.ddim_steps, 0., gov_eqs = 'mechanics')
+                else:
+                    x0_pred = self.model(noisy_in_red, time)
+                    model_out = x0_pred
         assert len(x0_pred.shape) == 4, 'Model output must be a tensor shaped as an image (with explicit axes for the spatial dimensions).'
         batch_size, output_dim, pixels_per_dim, pixels_per_dim = x0_pred.shape
                 
