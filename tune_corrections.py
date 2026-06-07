@@ -81,6 +81,8 @@ def objective(trial):
 study = optuna.create_study(study_name=args.study, storage=args.storage, load_if_exists=True,
                             directions=['minimize', 'minimize'],
                             sampler=NSGAIISampler(population_size=16, seed=0))
+# anchor: the uncorrected baseline (so the Pareto front shows the no-correction residual/realism)
+study.enqueue_trial({'N_correction': 0, 'M_correction': 0, 'correction_mode': 'xt'})
 study.optimize(objective, n_trials=args.n_trials)
 
 print('=== PARETO FRONT (residual vs realism) ===', flush=True)
