@@ -7,16 +7,6 @@ from einops_exts import rearrange_many
 from rotary_embedding_torch import RotaryEmbedding
 import numpy as np
 
-class Conv3dAsConv2d(nn.Conv2d):
-    """Drop-in replacement for nn.Conv3d when every Conv3d in the model has
-    depth-kernel == 1. Squeezes the singleton depth dim, runs cuDNN's 2D
-    convolution path (much better tensor-core kernel coverage), then
-    re-unsqueezes. Mathematically identical to the corresponding Conv3d."""
-    def forward(self, x):
-        if x.dim() == 5:
-            return super().forward(x.squeeze(2)).unsqueeze(2)
-        return super().forward(x)
-
 # helpers functions
 
 def generalized_image_to_b_xy_c(tensor):
@@ -204,7 +194,7 @@ class CircularUpsample(nn.Module):
 
 def Downsample(dim, padding_mode='zeros'):
     if padding_mode == 'zeros' or padding_mode == 'circular':
-        return Conv3dAsConv2d(dim, dim, 4, 2, 1, padding_mode=padding_mode)
+        return nn.Conv3d(dim, dim, (1, 4, 4), (1, 2, 2), (0, 1, 1), padding_mode=padding_mode)
     else:
         raise ValueError('Unknown padding mode: {}'.format(padding_mode))
 
@@ -234,7 +224,7 @@ class Block(nn.Module):
     def __init__(self, dim, dim_out, padding_mode = 'zeros', groups = 8):
         super().__init__()
         if padding_mode == 'zeros' or padding_mode == 'circular':
-            self.proj = Conv3dAsConv2d(dim, dim_out, 3, padding=1, padding_mode=padding_mode)
+            self.proj = nn.Conv3d(dim, dim_out, (1, 3, 3), padding = (0, 1, 1), padding_mode=padding_mode)
         else:
             raise ValueError('Unknown padding mode: {}'.format(padding_mode))
         self.norm = nn.GroupNorm(groups, dim_out)
@@ -260,7 +250,7 @@ class ResnetBlock(nn.Module):
 
         self.block1 = Block(dim, dim_out, padding_mode = padding_mode, groups = groups)
         self.block2 = Block(dim_out, dim_out, padding_mode = padding_mode, groups = groups)
-        self.res_conv = Conv3dAsConv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
+        self.res_conv = nn.Conv3d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
 
     def forward(self, x, time_emb = None):
 
@@ -460,7 +450,7 @@ class Unet3D(nn.Module):
         init_padding = init_kernel_size // 2
 
         if self.padding_mode == 'zeros' or self.padding_mode == 'circular':
-            self.init_conv = Conv3dAsConv2d(self.input_channels, init_dim, init_kernel_size, padding=init_padding, padding_mode=self.padding_mode)
+            self.init_conv = nn.Conv3d(self.input_channels, init_dim, (1, init_kernel_size, init_kernel_size), padding = (0, init_padding, init_padding), padding_mode=self.padding_mode)
         else:
             raise ValueError('Unknown padding mode: {}'.format(self.padding_mode))
         
@@ -524,7 +514,7 @@ class Unet3D(nn.Module):
         out_dim = default(out_dim, channels)
         self.final_conv = nn.Sequential(
             block_klass(dim * 2, dim),
-            Conv3dAsConv2d(dim, out_dim, 1)
+            nn.Conv3d(dim, out_dim, 1)
         )
 
         # gradient embedding as in 'A physics-informed diffusion model for high-fidelity flow field reconstruction'
