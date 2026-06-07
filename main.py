@@ -51,6 +51,8 @@ DEFAULTS = dict(
     model_dim=None,             # None -> per-gov_eqs default (darcy 32 / mechanics 128)
     batch_size=None,            # None -> per-gov_eqs default
     batch_schedule=None,        # optional {iter: batch_size} ramp (e.g. {0:64, 22000:128, 35000:256})
+    fd_acc_schedule=None,       # optional {iter: fd_acc} ramp, darcy only (e.g. {25000: 4})
+    c_residual_schedule=None,   # optional {iter: c_residual} (e.g. recalibrate at the fd_acc switch)
     train_iterations=None,      # None -> per-gov_eqs default (HPO callers pass a small value)
     # --- evaluation cadence ---
     test_eval_freq=500,
@@ -344,8 +346,10 @@ def train(overrides=None, trial=None):
     if use_double:
         torch.set_default_dtype(torch.float64)
 
-    # optional batch-size ramp: {iter: batch_size} (JSON may stringify keys -> normalize to int)
+    # optional schedules: JSON may stringify dict keys -> normalize to int
     batch_schedule = {int(k): v for k, v in (p['batch_schedule'] or {}).items()}
+    fd_acc_schedule = {int(k): int(v) for k, v in (p['fd_acc_schedule'] or {}).items()}
+    c_residual_schedule = {int(k): float(v) for k, v in (p['c_residual_schedule'] or {}).items()}
 
     def make_train_dl(bs):
         return cycle(DataLoader(ds, batch_size=bs, shuffle=False,
@@ -368,9 +372,10 @@ def train(overrides=None, trial=None):
                        sigmoid_last_channel=sigmoid_last_channel)
         return m.to(device)
 
-    def build_residuals(m):
+    def build_residuals(m, fd=None):
+        fd = fd if fd is not None else fd_acc
         if gov_eqs == 'darcy':
-            return ResidualsDarcy(model=m, fd_acc=fd_acc, pixels_per_dim=pixels_per_dim,
+            return ResidualsDarcy(model=m, fd_acc=fd, pixels_per_dim=pixels_per_dim,
                                   pixels_at_boundary=pixels_at_boundary, reverse_d1=reverse_d1,
                                   device=device, bcs=bcs, domain_length=domain_length,
                                   residual_grad_guidance=residual_grad_guidance,
@@ -601,6 +606,13 @@ def train(overrides=None, trial=None):
                 cur_bs = batch_schedule[iteration]
                 dl = make_train_dl(cur_bs)   # new shape -> one-time torch.compile recapture
                 print(f'batch_size -> {cur_bs} at iter {iteration}', flush=True)
+            if iteration in fd_acc_schedule and iteration > 0:
+                residuals = build_residuals(model, fd=fd_acc_schedule[iteration])  # swap stencil order
+                print(f'fd_acc -> {fd_acc_schedule[iteration]} at iter {iteration}', flush=True)
+            if iteration in c_residual_schedule and iteration > 0:
+                loss_kwargs['c_residual'] = c_residual_schedule[iteration]          # recalibrate physics weight
+                log_fn({'c_residual': loss_kwargs['c_residual']}, step=iteration)
+                print(f'c_residual -> {loss_kwargs["c_residual"]:.3e} at iter {iteration}', flush=True)
             torch.compiler.cudagraph_mark_step_begin()  # safe CUDA Graph replay
             model.train()
             cur_batch = next(dl).to(device, non_blocking=True)
