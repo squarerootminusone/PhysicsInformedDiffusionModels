@@ -39,7 +39,7 @@ def eval_precision(dtype):
                              use_dynamic_threshold=False, residual_func=res, eval_residuals=True,
                              return_optimizer=False, return_inequality=False,
                              M_correction=0, N_correction=0, correction_mode='xt')
-    r = out[1]['residual'].abs().mean(dim=tuple(range(1, out[1]['residual'].ndim)))
+    r = out[1]['residual'].detach().abs().mean(dim=tuple(range(1, out[1]['residual'].ndim)))
     return float(r.double().mean()), float(r.double().median())
 
 
