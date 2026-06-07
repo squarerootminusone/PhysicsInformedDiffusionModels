@@ -13,10 +13,11 @@ CKPT = sys.argv[1]
 CONFIG_PATH = sys.argv[2] if len(sys.argv) > 2 else str(Path(CKPT).parent / 'model.yaml')
 N = int(sys.argv[3]) if len(sys.argv) > 3 else 16
 
-from src.data_utils import *               # binds `device`, cycle, etc.
 from src.denoising_utils import DenoisingDiffusion
 from src.unet_model import Unet3D
 from src.residuals_darcy import ResidualsDarcy
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 cfg = yaml.safe_load(Path(CONFIG_PATH).read_text())
 state = torch.load(CKPT, map_location='cpu')['model']
