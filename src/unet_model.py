@@ -348,21 +348,15 @@ class Attention(nn.Module):
         q, k, v = rearrange_many(qkv, '... n (h d) -> ... h n d', h = self.heads)
         if exists(self.rotary_emb):
             k = self.rotary_emb.rotate_queries_or_keys(k)
-        # scale
-        q = q * self.scale
-        # rotate positions into queries and keys for time attention
-        if exists(self.rotary_emb):
             q = self.rotary_emb.rotate_queries_or_keys(q)
-        # similarity
-        sim = einsum('... h i d, ... h j d -> ... h i j', q, k)
-        # relative positional bias
-        if exists(pos_bias):
-            sim = sim + pos_bias
-        # numerical stability
-        sim = sim - sim.amax(dim = -1, keepdim = True).detach()
-        attn = sim.softmax(dim = -1)
-        # aggregate values
-        out = einsum('... h i j, ... h j d -> ... h i d', attn, v)
+        # opt11a: F.scaled_dot_product_attention (FlashAttention path on sm_120 for bf16/fp16,
+        # memory-efficient path on fp32). Replaces manual QK + softmax + @V materializing [B,H,seq,seq].
+        # Note: we don't pre-scale q because SDPA handles scale internally.
+        out = torch.nn.functional.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=pos_bias if exists(pos_bias) else None,
+            scale=self.scale,
+        )
         out = rearrange(out, '... h n d -> ... n (h d)')
         return self.to_out(out)
 
