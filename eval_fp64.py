@@ -12,6 +12,7 @@ from pathlib import Path
 CKPT = sys.argv[1]
 CONFIG_PATH = sys.argv[2] if len(sys.argv) > 2 else str(Path(CKPT).parent / 'model.yaml')
 N = int(sys.argv[3]) if len(sys.argv) > 3 else 16
+FD_ACC = int(sys.argv[4]) if len(sys.argv) > 4 else None   # override the eval stencil order (for fair comparison)
 
 from src.denoising_utils import DenoisingDiffusion
 from src.unet_model import Unet3D
@@ -30,7 +31,8 @@ def eval_precision(dtype):
     m = Unet3D(dim=32, channels=2, sigmoid_last_channel=False).to(device).to(dtype)
     m.load_state_dict({k: v.to(dtype) for k, v in state.items()}, strict=False)
     m.eval()
-    res = ResidualsDarcy(model=m, fd_acc=cfg['fd_acc'], pixels_per_dim=64, pixels_at_boundary=True,
+    res = ResidualsDarcy(model=m, fd_acc=(FD_ACC if FD_ACC is not None else cfg['fd_acc']),
+                         pixels_per_dim=64, pixels_at_boundary=True,
                          reverse_d1=True, device=device, bcs='none', domain_length=1.,
                          residual_grad_guidance=False,
                          use_ddim_x0=(cfg['x0_estimation'] == 'sample'), ddim_steps=cfg['ddim_steps'])
