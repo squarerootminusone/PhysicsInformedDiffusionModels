@@ -1,3 +1,4 @@
+import os
 import torch
 import einops as ein
 from src.grad_utils import *
@@ -6,6 +7,8 @@ import solidspy.uelutil as ue
 import torch.nn.functional as F
 from einops import rearrange
 import cv2
+
+_OPT8_VARIANT = os.environ.get('OPT8_VARIANT', '')  # '', 'b', 'c', 'd'
 
 def resize_image(tensor, target_size):
     """
@@ -39,6 +42,8 @@ class StiffnessMatrix:
         self.tot_local_stiffness = torch.tensor(tot_local_stiffness, dtype=dtype).to(device)
         self.indices_ext = torch.cartesian_prod(torch.arange(ndof), torch.arange(ndof)).to(device)
         self.glob_assembler_idcs = glob_assembler[:, self.indices_ext].to(device)
+        # opt10c: precompute identity matrix (neq×neq) once; was being allocated ~287MB per residual eval
+        self.eye_neq = torch.eye(self.neq, dtype=dtype, device=device)
 
     def readin(self, folder=""):
         """Read the input files"""
@@ -205,17 +210,44 @@ class ResidualsMechanics:
         displacements_y_stiff = self.stiffs.image_to_stiffness_coord(displacements[:,1], 1)
         displacements_stiff = displacements_x_stiff+displacements_y_stiff
         # extend indices to batch
-        global_batch_idcs = torch.arange(batch_size).repeat_interleave(self.stiffs.nels*(self.stiffs.ndof**2)).to(displacements.device)
-        glob_assembler_idcs_ext = self.stiffs.glob_assembler_idcs.unsqueeze(0).repeat(batch_size, 1, 1, 1)
-        # initialize the global stiffness matrix
-        k_closed_glob_vec_batched_temp = torch.zeros((batch_size, self.stiffs.neq, self.stiffs.neq), dtype = displacements.dtype, device = displacements.device)
+        if _OPT8_VARIANT in ('c', 'd'):
+            # opt8c/d: cache batch-dependent indices (recomputed only when batch size changes)
+            if not hasattr(self, '_idx_cache_bs') or self._idx_cache_bs != batch_size:
+                self._cached_gb_idcs = torch.arange(batch_size, device=displacements.device).repeat_interleave(self.stiffs.nels*(self.stiffs.ndof**2))
+                self._cached_gae_ext = self.stiffs.glob_assembler_idcs.unsqueeze(0).repeat(batch_size, 1, 1, 1).contiguous()
+                self._cached_gae_flat_0 = self._cached_gae_ext[:,:,:,0].flatten()
+                self._cached_gae_flat_1 = self._cached_gae_ext[:,:,:,1].flatten()
+                neq = self.stiffs.neq
+                # Precomputed flat scatter index for variant d (also useful as raw for variant c)
+                self._cached_scatter_flat_idx = (self._cached_gb_idcs * neq * neq) + (self._cached_gae_flat_0 * neq) + self._cached_gae_flat_1
+                self._idx_cache_bs = batch_size
+            global_batch_idcs = self._cached_gb_idcs
+            glob_assembler_idcs_ext = self._cached_gae_ext
+            gae_flat_0 = self._cached_gae_flat_0
+            gae_flat_1 = self._cached_gae_flat_1
+        else:
+            global_batch_idcs = torch.arange(batch_size).repeat_interleave(self.stiffs.nels*(self.stiffs.ndof**2)).to(displacements.device)
+            glob_assembler_idcs_ext = self.stiffs.glob_assembler_idcs.unsqueeze(0).repeat(batch_size, 1, 1, 1)
+            gae_flat_0 = glob_assembler_idcs_ext[:,:,:,0].flatten()
+            gae_flat_1 = glob_assembler_idcs_ext[:,:,:,1].flatten()
         # scale the local stiffness matrices (which is constant) over the batch
         scaled_kloc = self.stiffs.tot_local_stiffness.unsqueeze(0) * rho_flatten[:, :, None, None]
         # extract the values according to dofs
         scaled_kloc_val = scaled_kloc[:, :, self.stiffs.indices_ext[:,0], self.stiffs.indices_ext[:,1]]
-        # use advanced indexing to sum the contributions
-        # would be nice to use sparse matrices here, but not yet supported by index_put_
-        k_closed_glob_vec_batched = k_closed_glob_vec_batched_temp.index_put((global_batch_idcs.flatten(), glob_assembler_idcs_ext[:,:,:,0].flatten(), glob_assembler_idcs_ext[:,:,:,1].flatten()), scaled_kloc_val.flatten(), accumulate=True)
+        # assemble global stiffness matrix
+        if _OPT8_VARIANT in ('b', 'd'):
+            # opt8b/d: scatter_add_ on a flat tensor (faster than index_put_(accumulate=True))
+            if _OPT8_VARIANT == 'd':
+                flat_idx = self._cached_scatter_flat_idx
+            else:
+                neq = self.stiffs.neq
+                flat_idx = (global_batch_idcs * neq * neq) + (gae_flat_0 * neq) + gae_flat_1
+            k_flat = torch.zeros(batch_size * self.stiffs.neq * self.stiffs.neq, dtype=displacements.dtype, device=displacements.device)
+            k_flat.scatter_add_(0, flat_idx, scaled_kloc_val.flatten())
+            k_closed_glob_vec_batched = k_flat.view(batch_size, self.stiffs.neq, self.stiffs.neq)
+        else:
+            k_closed_glob_vec_batched_temp = torch.zeros((batch_size, self.stiffs.neq, self.stiffs.neq), dtype = displacements.dtype, device = displacements.device)
+            k_closed_glob_vec_batched = k_closed_glob_vec_batched_temp.index_put((global_batch_idcs.flatten(), gae_flat_0, gae_flat_1), scaled_kloc_val.flatten(), accumulate=True)
         load_x_stiff = self.stiffs.image_to_stiffness_coord(load_x.squeeze(1), 0)
         load_y_stiff = self.stiffs.image_to_stiffness_coord(load_y.squeeze(1), 1)
         f_glob = load_x_stiff+load_y_stiff
@@ -230,7 +262,7 @@ class ResidualsMechanics:
         mask_ext = mask.unsqueeze(-1).expand_as(k_closed_glob_vec_batched)
         k_closed_glob_vec_batched[mask_ext] = 0
         # create mask that is True where mask is False and if on diagonal
-        identity = torch.eye(self.stiffs.neq, device=k_closed_glob_vec_batched.device, dtype=k_closed_glob_vec_batched.dtype).expand(batch_size, -1, -1)
+        identity = self.stiffs.eye_neq.unsqueeze(0).expand(batch_size, -1, -1)
         identity_masked = identity * mask_ext
         # Set the diagonal elements to 1 where the mask is True
         k_closed_glob_vec_batched += identity_masked
@@ -296,7 +328,7 @@ class ResidualsMechanics:
                 mask = BC_node_x_stiff+BC_node_y_stiff != 0
                 mask_ext = mask.unsqueeze(-1).expand_as(k_closed_glob_vec_batched)
                 k_closed_glob_vec_batched[mask_ext] = 0
-                identity = torch.eye(self.stiffs.neq, device=k_closed_glob_vec_batched.device, dtype=k_closed_glob_vec_batched.dtype).expand(batch_size, -1, -1)
+                identity = self.stiffs.eye_neq.unsqueeze(0).expand(batch_size, -1, -1)
                 identity_masked = identity * mask_ext
                 k_closed_glob_vec_batched += identity_masked
 
@@ -322,7 +354,7 @@ class ResidualsMechanics:
                 mask = BC_node_x_stiff+BC_node_y_stiff != 0
                 mask_ext = mask.unsqueeze(-1).expand_as(k_closed_glob_vec_batched)
                 k_closed_glob_vec_batched[mask_ext] = 0
-                identity = torch.eye(self.stiffs.neq, device=k_closed_glob_vec_batched.device, dtype=k_closed_glob_vec_batched.dtype).expand(batch_size, -1, -1)
+                identity = self.stiffs.eye_neq.unsqueeze(0).expand(batch_size, -1, -1)
                 identity_masked = identity * mask_ext
                 k_closed_glob_vec_batched += identity_masked
 

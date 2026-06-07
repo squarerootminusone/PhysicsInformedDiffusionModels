@@ -165,18 +165,52 @@ class EMA(object):
         self.mu = mu
         self.shadow = {}
         self.backup = {}
+        # opt8e: cache tensor lists for fused _foreach_ ops (set via _cache_lists)
+        self._opt8e_foreach = os.environ.get('OPT8_EMA_FOREACH', '') == '1'
+        self._lists_cached = False
 
     def register(self, module):
         for name, param in module.named_parameters():
             if param.requires_grad:
                 self.shadow[name] = param.data.clone()
 
+    def _cache_lists(self, module):
+        self._param_names = []
+        self._shadow_list = []
+        self._param_list = []
+        for name, param in module.named_parameters():
+            if param.requires_grad:
+                self._param_names.append(name)
+                self._shadow_list.append(self.shadow[name])
+                self._param_list.append(param.data)
+        self._lists_cached = True
+
     def update(self, module):
+        if self._opt8e_foreach:
+            if not self._lists_cached:
+                self._cache_lists(module)
+            # lerp(shadow, param, 1-mu) = shadow + (1-mu)*(param - shadow) = mu*shadow + (1-mu)*param
+            torch._foreach_lerp_(self._shadow_list, self._param_list, 1.0 - self.mu)
+            return
         for name, param in module.named_parameters():
             if param.requires_grad:
                 self.shadow[name].data = (1. - self.mu) * param.data + self.mu * self.shadow[name].data
 
     def ema(self, module, backup=True):
+        if self._opt8e_foreach:
+            if not self._lists_cached:
+                self._cache_lists(module)
+            if backup:
+                # cache backup tensor list once
+                if not hasattr(self, '_backup_list'):
+                    self._backup_list = [p.clone() for p in self._param_list]
+                else:
+                    torch._foreach_copy_(self._backup_list, self._param_list)
+                # populate dict for legacy access compatibility
+                for n, t in zip(self._param_names, self._backup_list):
+                    self.backup[n] = t
+            torch._foreach_copy_(self._param_list, self._shadow_list)
+            return
         for name, param in module.named_parameters():
             if param.requires_grad:
                 assert name in self.shadow
@@ -185,6 +219,11 @@ class EMA(object):
                 param.data.copy_(self.shadow[name].data)
 
     def restore(self, module):
+        if self._opt8e_foreach:
+            assert hasattr(self, '_backup_list')
+            torch._foreach_copy_(self._param_list, self._backup_list)
+            self.backup = {}
+            return
         assert hasattr(self, 'backup')
         for name, param in module.named_parameters():
             if param.requires_grad:
@@ -718,19 +757,18 @@ class DenoisingDiffusion(nn.Module):
         else:
             batch_t = t
 
-        batch_t = batch_t.cpu().numpy()
-        seqs = []
-        seqs_next = []
-        for t_idx, t in enumerate(batch_t):
-            seq = list(map(int, np.linspace(0, batch_t[t_idx], sample_timesteps+2, endpoint=True, dtype=float))) # evenly spread from 0 to current t
-            seqs.append(list(reversed(seq)))
-            seq_next = [-1] + list(seq[:-1])
-            seqs_next.append(list(reversed(seq_next)))
-            seq = None
-
-        # tranpose to have time as first dimension
-        cur_times = torch.tensor(seqs, device=device).T
-        next_times = torch.tensor(seqs_next, device=device).T
+        # opt10b: pure-GPU equivalent of the original .cpu().numpy() + np.linspace Python loop.
+        # Replaces a forced sync barrier per training iter with one GPU-side construction.
+        ts_frac = torch.arange(sample_timesteps + 2, device=device, dtype=torch.float32) / float(sample_timesteps + 1)  # (steps+2,) in [0, 1]
+        seqs_forward = (batch_t.to(torch.float32).unsqueeze(1) * ts_frac.unsqueeze(0)).long()  # (batch, steps+2): [0, step, ..., batch_t[i]]
+        seqs_rev = seqs_forward.flip(1)  # (batch, steps+2): [batch_t[i], ..., step, 0]
+        seqs_next_unrev = torch.cat([
+            torch.full((batch_t.shape[0], 1), -1, device=device, dtype=torch.long),
+            seqs_forward[:, :-1],
+        ], dim=1)  # (batch, steps+2): [-1, 0, ..., batch_t[i]-step]
+        seqs_next_rev = seqs_next_unrev.flip(1)  # (batch, steps+2): [batch_t[i]-step, ..., 0, -1]
+        cur_times = seqs_rev.T   # (steps+2, batch)
+        next_times = seqs_next_rev.T  # (steps+2, batch)
 
         time_pairs = list(zip(cur_times, next_times)) # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
 
