@@ -178,9 +178,12 @@ for iteration in pbar:
     if iteration > ema_start:
         ema.update(model)
 
-    # evaluation on validation set
-    model.eval()
-    ema.ema(residuals.model)
+    # opt10a: only swap EMA weights when we actually need them (test or sample eval)
+    _do_eval = (iteration % test_eval_freq == 0 and exists(dl_valid)) or \
+               (iteration % sample_freq == 0) or (iteration == train_iterations)
+    if _do_eval:
+        model.eval()
+        ema.ema(residuals.model)
     if iteration % test_eval_freq == 0 and exists(dl_valid):
         cur_test_batch = next(dl_valid).to(device)
         # NOTE: we do not use torch.no_grad() since we may require residual gradient for classifier-free guidance
@@ -306,14 +309,24 @@ for iteration in pbar:
             df.to_csv(csv_path, index=False)
 
         if topopt_eval and gov_eqs == 'mechanics':
-            log_fn({'rel_CE_error': np.nanmean(output[1]['rel_CE_error_full_batch'].detach().cpu().numpy())}, step=iteration)
-            log_fn({'rel_vf_error': np.nanmean(output[1]['vf_error_full_batch'].detach().cpu().numpy())}, step=iteration)
-            log_fn({'fm_error': np.nanmean(output[1]['fm_error_full_batch'].detach().cpu().numpy())}, step=iteration)
+            _ce = output[1]['rel_CE_error_full_batch'].detach().cpu().numpy()
+            _vf = output[1]['vf_error_full_batch'].detach().cpu().numpy()
+            _fm = output[1]['fm_error_full_batch'].detach().cpu().numpy()
+            # Paper's headline metric — MDN % CE = median of relative compliance error (table 1 caption, §4.2)
+            log_fn({'rel_CE_error_median': np.nanmedian(_ce)}, step=iteration)
+            log_fn({'rel_CE_error': np.nanmean(_ce)}, step=iteration)
+            log_fn({'rel_vf_error': np.nanmean(_vf)}, step=iteration)  # paper's % VFE = mean
+            log_fn({'rel_vf_error_median': np.nanmedian(_vf)}, step=iteration)
+            log_fn({'fm_error': np.nanmean(_fm)}, step=iteration)
+            log_fn({'fm_error_median': np.nanmedian(_fm)}, step=iteration)
 
         if iteration > 0:
             save_model(config, model, iteration, output_save_dir)
 
-    ema.restore(residuals.model)
+    # opt10a: only restore when we actually swapped
+    if _do_eval:
+        ema.restore(residuals.model)
+        model.train()
 
 if wandb_track:
     wandb.finish()
