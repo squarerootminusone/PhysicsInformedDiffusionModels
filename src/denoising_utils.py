@@ -717,14 +717,15 @@ class DenoisingDiffusion(nn.Module):
 
         # adjust data-driven loss term
         data_loss = c_data * loss
-        data_loss_track = data_loss.item()
+        # opt14: detached 0-dim tensors instead of .item() — each .item() forces a device
+        # sync every iteration on this dispatch-bound workload; callers convert at log freq.
+        data_loss_track = data_loss.detach()
         loss = data_loss
 
         # add negative residual log-likelihood, i.e., - log p(r|x_0_pred(x_0))
         var = extract(self.diff_dict['posterior_variance_clipped'], t, residual)
         
-        # residual_loss_track = residual.mean().item()
-        residual_loss_track = residual.abs().mean().item()
+        residual_loss_track = residual.detach().abs().mean()
 
         residual_log_likelihood = self.gaussian_log_likelihood(torch.zeros_like(residual), means=residual, variance=var)
         residual_loss = c_residual * -1. * residual_log_likelihood
@@ -735,7 +736,7 @@ class DenoisingDiffusion(nn.Module):
             # add negative inequality residual log-likelihood, i.e., - log p(r_ineq|x_0_pred(x_0)) (similar to above)
             ineq_log_likelihood = self.gaussian_log_likelihood(torch.zeros_like(out_dict['inequality']), means=out_dict['inequality'], variance=var)
             ineq_loss = c_ineq * -1. * ineq_log_likelihood
-            ineq_loss_track = out_dict['inequality'].mean().item()
+            ineq_loss_track = out_dict['inequality'].detach().mean()
             loss += ineq_loss.mean()
 
         opt_loss_track = 0.
@@ -743,7 +744,7 @@ class DenoisingDiffusion(nn.Module):
             # add optimization log-likelihood, i.e., log p(c=c_min|x_0_pred(x_0)) (where p is Expon. distribution)
             opt_log_likelihood = -1. * out_dict['optimizer']
             opt_loss = -1. * lambda_opt * opt_log_likelihood
-            opt_loss_track = out_dict['optimizer'].mean().item()
+            opt_loss_track = out_dict['optimizer'].detach().mean()
             loss += opt_loss.mean()
 
         return loss, data_loss_track, residual_loss_track, ineq_loss_track, opt_loss_track
