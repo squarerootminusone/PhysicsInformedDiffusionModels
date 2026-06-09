@@ -1,7 +1,11 @@
+import os
 import torch
 from src.grad_utils import *
 import einops as ein
-        
+
+# B1: exact line-search step for residual_correction instead of eps=1e-6/max|jacfwd|
+_B1_LINESEARCH = os.environ.get('B1_LINESEARCH', '') == '1'
+
 class ResidualsDarcy:
     def __init__(self, model, fd_acc, pixels_per_dim, pixels_at_boundary, reverse_d1, device = 'cpu', bcs = 'none', domain_length = 1., residual_grad_guidance = False, use_ddim_x0 = False, ddim_steps = 0):
         """
@@ -216,7 +220,29 @@ class ResidualsDarcy:
 
         residual_x0_pred = self.compute_residual(generalized_b_xy_c_to_image(x0_pred), pass_through = True)['residual']
         dr_dp = torch.autograd.grad(torch.sum(residual_x0_pred**2), x0_pred)[0][:,:,0] # residuals w.r.t. p
-        
+
+        if _B1_LINESEARCH:
+            # B1: the Darcy residual is affine in p (K fixed, mean-correction detached, BC terms
+            # are p-gradients), so phi(a) = ||r(p - a*g)||^2 is exactly quadratic in a. One probe
+            # evaluation recovers J@g by finite difference and gives the exact per-sample minimizer
+            # a* = <r0, J@g> / ||J@g||^2 — no per-sample jacfwd Jacobian needed.
+            with torch.no_grad():
+                g = dr_dp.detach()
+                r0 = residual_x0_pred.detach()
+                p_norm = x0_pred_in[:, :, 0].detach().flatten(1).norm(dim=1)
+                g_norm = g.flatten(1).norm(dim=1)
+                alpha_probe = (1e-3 * p_norm + 1e-12) / (g_norm + 1e-12)
+                x_probe = x0_pred_in.detach().clone()
+                x_probe[:, :, 0] -= alpha_probe.unsqueeze(1) * g
+                r_probe = self.compute_residual(generalized_b_xy_c_to_image(x_probe), pass_through=True)['residual'].detach()
+                jg = (r0 - r_probe) / alpha_probe.view(-1, *([1] * (r0.ndim - 1)))
+                num = (r0 * jg).flatten(1).sum(dim=1)
+                den = (jg * jg).flatten(1).sum(dim=1).clamp_min(1e-30)
+                alpha_star = (num / den).clamp_min(0.)   # never step uphill
+            x0_pred_in[:, :, 0] -= alpha_star.unsqueeze(1) * g
+            residual_corrected = self.compute_residual(generalized_b_xy_c_to_image(x0_pred_in), pass_through=True)['residual']
+            return x0_pred_in, residual_corrected
+
         jacobian_batch_size = 1 # reduced batch size to avoid OOM
         jacobian_vmap = vmap(jacfwd(self.compute_residual_direct, argnums=0, has_aux=False), in_dims=0, out_dims=0)
         num_batches = x0_pred.shape[0] // jacobian_batch_size + (0 if x0_pred.shape[0] % jacobian_batch_size == 0 else 1)

@@ -28,7 +28,8 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 ap = argparse.ArgumentParser()
 ap.add_argument('--ckpt', default='trained_models/lrdecay_r0/model/checkpoint_50000.pt')
-ap.add_argument('--config', default='configs/darcy_pidm_me.yaml')
+ap.add_argument('--config', default=None,
+                help="run config; defaults to the checkpoint's sibling model.yaml (self-describing model_dim)")
 ap.add_argument('--study', default='corrections_n')
 ap.add_argument('--storage', default='sqlite:///pidm_corrections.db')
 ap.add_argument('--n-trials', type=int, default=24)
@@ -37,9 +38,10 @@ ap.add_argument('--n-ref', type=int, default=1024)
 ap.add_argument('--n-proj', type=int, default=128)
 args = ap.parse_args()
 
-cfg = yaml.safe_load(Path(args.config).read_text())
+config_path = args.config if args.config else str(Path(args.ckpt).parent / 'model.yaml')
+cfg = yaml.safe_load(Path(config_path).read_text())
 
-model = Unet3D(dim=32, channels=2, sigmoid_last_channel=False).to(device)
+model = Unet3D(dim=cfg.get('model_dim', 32), channels=2, sigmoid_last_channel=False).to(device)
 state = torch.load(args.ckpt, map_location='cpu')['model']
 model.load_state_dict({k.replace('_orig_mod.', ''): v for k, v in state.items()}, strict=False)
 model.eval()
