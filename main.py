@@ -188,7 +188,7 @@ for iteration in pbar:
                     cur_test_batch, residual_func = residuals, c_data = c_data, c_residual = c_residual,
                     c_ineq = c_ineq, lambda_opt = lambda_opt)
         
-        print(f'test loss at iteration {iteration}: {loss_test:.3e}')
+        print(f'[iter {iteration}] test_loss: {loss_test:.3e} residual: {residual_loss_test:.3e}')
         log_fn({'loss_test': loss_test.item()}, step=iteration)
         log_fn({'loss_data_test': data_loss_test}, step=iteration)
         log_fn({'residual_mean_abs_test': residual_loss_test}, step=iteration)
@@ -306,9 +306,34 @@ for iteration in pbar:
             df.to_csv(csv_path, index=False)
 
         if topopt_eval and gov_eqs == 'mechanics':
-            log_fn({'rel_CE_error': np.nanmean(output[1]['rel_CE_error_full_batch'].detach().cpu().numpy())}, step=iteration)
-            log_fn({'rel_vf_error': np.nanmean(output[1]['vf_error_full_batch'].detach().cpu().numpy())}, step=iteration)
-            log_fn({'fm_error': np.nanmean(output[1]['fm_error_full_batch'].detach().cpu().numpy())}, step=iteration)
+            ce_valid = np.nanmean(output[1]['rel_CE_error_full_batch'].detach().cpu().numpy())
+            vf_valid = np.nanmean(output[1]['vf_error_full_batch'].detach().cpu().numpy())
+            fm_valid = np.nanmean(output[1]['fm_error_full_batch'].detach().cpu().numpy())
+            log_fn({'rel_CE_error': ce_valid}, step=iteration)
+            log_fn({'rel_vf_error': vf_valid}, step=iteration)
+            log_fn({'fm_error': fm_valid}, step=iteration)
+            print(f'[iter {iteration}] valid CE: {ce_valid:.3e} VFE: {vf_valid:.3e} fm: {fm_valid:.3e}')
+
+            for test_level_name, dl_test_level in [('test_level_1', dl_test_level_1), ('test_level_2', dl_test_level_2)]:
+                cur_batch_test = next(iter(dl_test_level)).to(device)
+                no_samples_test = min(no_samples, cur_batch_test.shape[0])
+                cur_batch_test = cur_batch_test[torch.randperm(cur_batch_test.shape[0], device=device)[:no_samples_test]]
+                conditioning_test, x_0_test, bcs_test = torch.tensor_split(cur_batch_test, (3, 6), dim=1)
+                sample_shape_test = (no_samples_test, output_dim, pixels_per_dim+1, pixels_per_dim+1)
+                output_test = diffusion_utils.p_sample_loop(
+                    (conditioning_test, bcs_test, x_0_test), sample_shape_test,
+                    save_output=False, surpress_noise=True,
+                    use_dynamic_threshold=use_dynamic_threshold,
+                    residual_func=residuals, eval_residuals=eval_residuals,
+                    return_optimizer=return_optimizer, return_inequality=return_inequality,
+                    M_correction=M_correction, N_correction=N_correction, correction_mode=correction_mode)
+                ce_test = np.nanmean(output_test[1]['rel_CE_error_full_batch'].detach().cpu().numpy())
+                vf_test = np.nanmean(output_test[1]['vf_error_full_batch'].detach().cpu().numpy())
+                fm_test = np.nanmean(output_test[1]['fm_error_full_batch'].detach().cpu().numpy())
+                log_fn({f'rel_CE_error_{test_level_name}': ce_test}, step=iteration)
+                log_fn({f'rel_vf_error_{test_level_name}': vf_test}, step=iteration)
+                log_fn({f'fm_error_{test_level_name}': fm_test}, step=iteration)
+                print(f'[iter {iteration}] {test_level_name} CE: {ce_test:.3e} VFE: {vf_test:.3e} fm: {fm_test:.3e}')
 
         if iteration > 0:
             save_model(config, model, iteration, output_save_dir)

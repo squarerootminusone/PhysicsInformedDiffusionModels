@@ -1,31 +1,20 @@
 #!/bin/bash
-#SBATCH --job-name=pidm_mech_pidm_se
+#SBATCH --job-name=eval_mech_diff
 #SBATCH --partition=gpu-a100
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --gpus-per-task=1
-#SBATCH --mem-per-cpu=8000M
-#SBATCH --time=23:59:00
+#SBATCH --mem-per-cpu=7500M
+#SBATCH --time=06:00:00
 #SBATCH --output=slurm/logs/%x_%j.out
 #SBATCH --error=slurm/logs/%x_%j.err
-
 set -euo pipefail
-
 WORKDIR="/scratch/dstoyanova/PhysicsInformedDiffusionModels"
-VARIANT="mechanics_pidm_se"
-
 cd "$WORKDIR"
 mkdir -p slurm/logs
-
 module load cuda/12.1
-
 source "$HOME/miniconda3/etc/profile.d/conda.sh"
 conda activate pidm
-
-cp "configs/${VARIANT}.yaml" model.yaml
-
-export PIDM_RUN_NAME="${VARIANT}_${SLURM_JOB_ID}"
-
 python - <<'PYEOF'
 import torch
 print("CUDA available:", torch.cuda.is_available())
@@ -35,8 +24,8 @@ if torch.cuda.is_available():
 else:
     raise RuntimeError("CUDA not available")
 PYEOF
-
-TMPSCRIPT=$(mktemp --suffix=_main.py)
-sed "s/name = 'run_1'/name = '${PIDM_RUN_NAME}'/" main.py > "$TMPSCRIPT"
-PYTHONPATH="$WORKDIR" python "$TMPSCRIPT"
-rm -f "$TMPSCRIPT"
+python sample_eval.py \
+    --directory_path ./trained_models/mechanics/ \
+    --name standard_diffusion \
+    --load_model_step 600000 \
+    --output_dir ./results/reproduced/topology/standard_diffusion
