@@ -639,12 +639,12 @@ def train(overrides=None, trial=None):
                 loss_val = loss.item()
                 pbar.set_description(f'training loss: {loss_val:.3e}')
                 log_fn({'loss': loss_val}, step=iteration)
-                log_fn({'loss_data': data_loss}, step=iteration)
-                log_fn({'residual_mean_abs': residual_loss}, step=iteration)
+                log_fn({'loss_data': float(data_loss)}, step=iteration)  # opt14: sync only at log freq
+                log_fn({'residual_mean_abs': float(residual_loss)}, step=iteration)
                 if c_ineq > 0:
-                    log_fn({'loss_inequality': ineq_loss}, step=iteration)
+                    log_fn({'loss_inequality': float(ineq_loss)}, step=iteration)
                 if lambda_opt > 0:
-                    log_fn({'loss_optimization': opt_loss}, step=iteration)
+                    log_fn({'loss_optimization': float(opt_loss)}, step=iteration)
                 if scheduler is not None:
                     loss_window.append(loss_val)
                     log_fn({'lr': optimizer.param_groups[0]['lr']}, step=iteration)  # dense for plotting
@@ -691,12 +691,12 @@ def train(overrides=None, trial=None):
                             cur_test_batch, residual_func=residuals, **loss_kwargs)
                     print(f'test loss at iteration {iteration}: {loss_test:.3e}')
                     log_fn({'loss_test': loss_test.item(),
-                            'loss_data_test': data_loss_test,
-                            'residual_mean_abs_test': residual_loss_test}, step=iteration)
+                            'loss_data_test': float(data_loss_test),
+                            'residual_mean_abs_test': float(residual_loss_test)}, step=iteration)
                     if c_ineq > 0:
-                        log_fn({'loss_inequality_test': ineq_loss_test}, step=iteration)
+                        log_fn({'loss_inequality_test': float(ineq_loss_test)}, step=iteration)
                     if lambda_opt > 0:
-                        log_fn({'loss_optimization_test': opt_loss_test}, step=iteration)
+                        log_fn({'loss_optimization_test': float(opt_loss_test)}, step=iteration)
                     best_residual_test = min(best_residual_test, float(residual_loss_test))
                     ema.restore(residuals.model)
                     model.train()
