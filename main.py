@@ -166,7 +166,8 @@ class SampleEvaluator:
     skips a trigger only if a previous sampling pass is still running."""
 
     def __init__(self, eval_model, eval_residuals, eval_diffusion, sample_shape, log_fn,
-                 use_dynamic_threshold=False, M_correction=0, N_correction=0, correction_mode='xt'):
+                 use_dynamic_threshold=False, M_correction=0, N_correction=0, correction_mode='xt',
+                 swd_fn=None):
         self.eval_model = eval_model.eval()
         self.eval_residuals = eval_residuals
         self.diffusion = eval_diffusion
@@ -176,6 +177,7 @@ class SampleEvaluator:
         self.M_correction = M_correction
         self.N_correction = N_correction
         self.correction_mode = correction_mode
+        self.swd_fn = swd_fn   # optional sliced-Wasserstein vs training data (distribution co-metric)
         self.stream = torch.cuda.Stream() if torch.cuda.is_available() else None
         self.q = queue.Queue(maxsize=1)
         self.results = queue.Queue()        # worker -> main thread (worker never touches wandb)
@@ -218,14 +220,21 @@ class SampleEvaluator:
                             correction_mode=self.correction_mode)
                         residual = output[1]['residual']
                         residual = residual.abs().mean(dim=tuple(range(1, residual.ndim)))
+                        swd_val = None
+                        if self.swd_fn is not None:
+                            # final generated fields; x_seq entries live on CPU
+                            field = output[0][0][-1].to(residual.device).flatten(1)
+                            swd_val = self.swd_fn(field)
                 if self.stream is not None:
                     self.stream.synchronize()
                 arr = residual.detach().cpu().numpy()
                 mean_abs = float(np.nanmean(arr))
+                data = {'residual_mean_abs_samples': mean_abs,
+                        'residual_median_abs_samples': float(np.nanmedian(arr))}
+                if swd_val is not None:
+                    data['swd_samples'] = swd_val
                 # compute-only: hand results to the main thread; never log from here
-                self.results.put((iteration, {'residual_mean_abs_samples': mean_abs,
-                                              'residual_median_abs_samples': float(np.nanmedian(arr))},
-                                  mean_abs))
+                self.results.put((iteration, data, mean_abs))
         except Exception as e:
             self._exc = e
 
@@ -240,7 +249,8 @@ class SampleEvaluator:
                 break
             self.log_fn(data, step=iteration)
             self.best = min(self.best, mean_abs)
-            print(f'sample-eval at iteration {iteration}: residual_mean_abs_samples={mean_abs:.3e}')
+            _swd = f" swd_samples={data['swd_samples']:.3e}" if 'swd_samples' in data else ''
+            print(f'sample-eval at iteration {iteration}: residual_mean_abs_samples={mean_abs:.3e}{_swd}')
 
     def close(self):
         try:
@@ -469,10 +479,24 @@ def train(overrides=None, trial=None):
         s_residuals = build_residuals(s_model)
         s_diffusion = DenoisingDiffusion(diff_steps, device, residual_grad_guidance)
         sample_shape = (no_samples, output_dim, pixels_per_dim, pixels_per_dim)
+        # sliced-Wasserstein co-metric vs the training distribution (fixed projections, fixed ref
+        # quantiles — same construction as tune_corrections.py). Detects samples leaving the data
+        # manifold while the residual improves (Goodhart guard).
+        _swd_ref = next(iter(DataLoader(ds, batch_size=min(1024, len(ds)), shuffle=True))) \
+            .to(device).flatten(1)
+        _swd_gen = torch.Generator().manual_seed(0)   # decoupled from training RNG
+        _swd_proj = F.normalize(torch.randn(128, _swd_ref.shape[1], generator=_swd_gen), dim=1).to(device)
+        _swd_qlev = torch.linspace(0., 1., 128, device=device)
+        _swd_ref_q = torch.quantile(_swd_ref @ _swd_proj.t(), _swd_qlev, dim=0)
+
+        def swd_fn(gen_flat):
+            gen_q = torch.quantile(gen_flat @ _swd_proj.t(), _swd_qlev, dim=0)
+            return float((gen_q - _swd_ref_q).abs().mean())
+
         sample_evaluator = SampleEvaluator(s_model, s_residuals, s_diffusion, sample_shape, log_fn,
                                            use_dynamic_threshold=use_dynamic_threshold,
                                            M_correction=M_correction, N_correction=N_correction,
-                                           correction_mode=correction_mode)
+                                           correction_mode=correction_mode, swd_fn=swd_fn)
     elif p['sample_eval_freq']:
         print('[sample-eval] only implemented for gov_eqs=="darcy"; disabled')
 
