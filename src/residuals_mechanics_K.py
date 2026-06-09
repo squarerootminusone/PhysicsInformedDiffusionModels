@@ -2,7 +2,6 @@ import os
 import torch
 import einops as ein
 from src.grad_utils import *
-from torchvision import transforms
 import solidspy.uelutil as ue
 import torch.nn.functional as F
 from einops import rearrange
@@ -20,7 +19,8 @@ def resize_image(tensor, target_size):
     num_dims = len(tensor.shape) - 3  # Subtracting batch and pixel dimensions
     pattern = 'b ' + ' '.join([f'c{i}' for i in range(num_dims)]) + ' x y -> b' + ' (' + ' '.join([f'c{i}' for i in range(num_dims)]) + ') ' + 'x y'
     tensor = ein.rearrange(tensor, pattern)
-    tensor = transforms.Resize((target_size, target_size), antialias=False)(tensor).view(batch_size, *original_shape[1:-2], target_size, target_size)
+    # equivalent of torchvision transforms.Resize(antialias=False) on tensors (drops the torchvision dep)
+    tensor = F.interpolate(tensor, size=(target_size, target_size), mode='bilinear', align_corners=False).view(batch_size, *original_shape[1:-2], target_size, target_size)
     return tensor
 
 class StiffnessMatrix:

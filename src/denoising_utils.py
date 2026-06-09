@@ -4,7 +4,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision import transforms
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import imageio
@@ -64,7 +63,8 @@ def resize_image(tensor, target_size):
     num_dims = len(tensor.shape) - 3  # Subtracting batch and pixel dimensions
     pattern = 'b ' + ' '.join([f'c{i}' for i in range(num_dims)]) + ' x y -> b' + ' (' + ' '.join([f'c{i}' for i in range(num_dims)]) + ') ' + 'x y'
     tensor = rearrange(tensor, pattern)
-    tensor = transforms.Resize((target_size, target_size), antialias=False)(tensor).view(batch_size, *original_shape[1:-2], target_size, target_size)
+    # equivalent of torchvision transforms.Resize(antialias=False) on tensors (drops the torchvision dep)
+    tensor = F.interpolate(tensor, size=(target_size, target_size), mode='bilinear', align_corners=False).view(batch_size, *original_shape[1:-2], target_size, target_size)
     return tensor
 
 def noop(*args, **kwargs):
