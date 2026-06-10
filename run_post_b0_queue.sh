@@ -24,6 +24,25 @@ train(dict(name='probe_opt15', config_path='configs/darcy_pidm_me.yaml',
            final_sample=False, wandb_track=False))
 " > /root/queue_probe_opt15.log 2>&1
 
+echo "[queue] stage 2.5: dim32 bf16 throughput probes (default vs reduce-overhead)"
+python -c "
+from main import train
+train(dict(name='probe_bf16_def', config_path='configs/darcy_pidm_me.yaml',
+           bf16_train=True, compile_mode='default',
+           train_iterations=2500, test_eval_freq=10**9, sample_freq=10**9,
+           final_sample=False, wandb_track=False))
+" > /root/queue_probe_bf16_def.log 2>&1
+python -c "
+from main import train
+train(dict(name='probe_bf16_ro', config_path='configs/darcy_pidm_me.yaml',
+           bf16_train=True, compile_mode='reduce-overhead',
+           train_iterations=2500, test_eval_freq=10**9, sample_freq=10**9,
+           final_sample=False, wandb_track=False))
+" > /root/queue_probe_bf16_ro.log 2>&1
+for f in /root/queue_probe_bf16_def.log /root/queue_probe_bf16_ro.log; do
+  echo "$f: $(tr '\r' '\n' < $f | grep -aoE '[0-9.]+it/s' | tail -1)"
+done
+
 echo "[queue] stage 3a: old-step correction reference on B0 ckpt (N=60, x0)"
 python tune_corrections.py --ckpt "$CKPT" --study corr_oldstep_b0 \
   --storage sqlite:///pidm_corr_b0.db --n-trials 2 --n-samples 24 \
