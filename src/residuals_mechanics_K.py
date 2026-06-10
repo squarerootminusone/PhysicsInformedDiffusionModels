@@ -42,6 +42,10 @@ class StiffnessMatrix:
         self.tot_local_stiffness = torch.tensor(tot_local_stiffness, dtype=dtype).to(device)
         self.indices_ext = torch.cartesian_prod(torch.arange(ndof), torch.arange(ndof)).to(device)
         self.glob_assembler_idcs = glob_assembler[:, self.indices_ext].to(device)
+        # opt16: element→global dof map for the matrix-free K@u path
+        self.glob_assembler_dofs = glob_assembler.long().to(device)            # [nels, ndof]
+        self.glob_assembler_flat = self.glob_assembler_dofs.reshape(-1)        # [nels*ndof]
+        assert int(self.glob_assembler_dofs.min()) >= 0, 'matrix-free path assumes all dofs are free (BCs applied via mask)'
         # opt10c: precompute identity matrix (neq×neq) once; was being allocated ~287MB per residual eval
         self.eye_neq = torch.eye(self.neq, dtype=dtype, device=device)
 
@@ -225,68 +229,94 @@ class ResidualsMechanics:
         displacements_x_stiff = self.stiffs.image_to_stiffness_coord(displacements[:,0], 0)
         displacements_y_stiff = self.stiffs.image_to_stiffness_coord(displacements[:,1], 1)
         displacements_stiff = displacements_x_stiff+displacements_y_stiff
-        # extend indices to batch
-        if _OPT8_VARIANT in ('c', 'd'):
-            # opt8c/d: cache batch-dependent indices (recomputed only when batch size changes)
-            if not hasattr(self, '_idx_cache_bs') or self._idx_cache_bs != batch_size:
-                self._cached_gb_idcs = torch.arange(batch_size, device=displacements.device).repeat_interleave(self.stiffs.nels*(self.stiffs.ndof**2))
-                self._cached_gae_ext = self.stiffs.glob_assembler_idcs.unsqueeze(0).repeat(batch_size, 1, 1, 1).contiguous()
-                self._cached_gae_flat_0 = self._cached_gae_ext[:,:,:,0].flatten()
-                self._cached_gae_flat_1 = self._cached_gae_ext[:,:,:,1].flatten()
-                neq = self.stiffs.neq
-                # Precomputed flat scatter index for variant d (also useful as raw for variant c)
-                self._cached_scatter_flat_idx = (self._cached_gb_idcs * neq * neq) + (self._cached_gae_flat_0 * neq) + self._cached_gae_flat_1
-                self._idx_cache_bs = batch_size
-            global_batch_idcs = self._cached_gb_idcs
-            glob_assembler_idcs_ext = self._cached_gae_ext
-            gae_flat_0 = self._cached_gae_flat_0
-            gae_flat_1 = self._cached_gae_flat_1
-        else:
-            global_batch_idcs = torch.arange(batch_size).repeat_interleave(self.stiffs.nels*(self.stiffs.ndof**2)).to(displacements.device)
-            glob_assembler_idcs_ext = self.stiffs.glob_assembler_idcs.unsqueeze(0).repeat(batch_size, 1, 1, 1)
-            gae_flat_0 = glob_assembler_idcs_ext[:,:,:,0].flatten()
-            gae_flat_1 = glob_assembler_idcs_ext[:,:,:,1].flatten()
-        # scale the local stiffness matrices (which is constant) over the batch
-        scaled_kloc = self.stiffs.tot_local_stiffness.unsqueeze(0) * rho_flatten[:, :, None, None]
-        # extract the values according to dofs
-        scaled_kloc_val = scaled_kloc[:, :, self.stiffs.indices_ext[:,0], self.stiffs.indices_ext[:,1]]
-        # assemble global stiffness matrix
-        if _OPT8_VARIANT in ('b', 'd'):
-            # opt8b/d: scatter_add_ on a flat tensor (faster than index_put_(accumulate=True))
-            if _OPT8_VARIANT == 'd':
-                flat_idx = self._cached_scatter_flat_idx
+
+        _opt16_mf = os.environ.get('OPT16_MATRIX_FREE', '') == '1'
+        if _opt16_mf:
+            # opt16: matrix-free K@u. The residual only needs the product K_mod@u - f, so we never
+            # materialize the dense B×neq×neq matrix (~1.7 GB at B=6): gather element displacements,
+            # apply the SIMP-scaled local stiffness per element, scatter-add into global dofs.
+            load_x_stiff = self.stiffs.image_to_stiffness_coord(load_x.squeeze(1), 0)
+            load_y_stiff = self.stiffs.image_to_stiffness_coord(load_y.squeeze(1), 1)
+            f_glob = load_x_stiff + load_y_stiff
+            BC_node_x_stiff = self.stiffs.image_to_stiffness_coord(bc_x.squeeze(1), 0)
+            BC_node_y_stiff = self.stiffs.image_to_stiffness_coord(bc_y.squeeze(1), 1)
+            mask = BC_node_x_stiff + BC_node_y_stiff != 0
+            f_glob = f_glob.masked_fill(mask, 0.)
+            u_elem = displacements_stiff[:, self.stiffs.glob_assembler_dofs]              # [B, nels, 8]
+            r_loc = torch.einsum('elm,bem->bel', self.stiffs.tot_local_stiffness, u_elem) \
+                    * rho_flatten[:, :, None]                                             # [B, nels, 8]
+            ku = torch.zeros(batch_size, self.stiffs.neq, dtype=displacements.dtype,
+                             device=displacements.device)
+            ku = ku.scatter_add(1, self.stiffs.glob_assembler_flat.unsqueeze(0).expand(batch_size, -1),
+                                r_loc.reshape(batch_size, -1))
+            # BC rows of the modified K are identity rows with f=0 → (K_mod u)_i = u_i
+            ku = torch.where(mask, displacements_stiff, ku)
+            residual = ku - f_glob
+
+        # extend indices to batch (dense path only; the topopt_eval block recomputes on demand)
+        if not _opt16_mf:
+            if _OPT8_VARIANT in ('c', 'd'):
+                # opt8c/d: cache batch-dependent indices (recomputed only when batch size changes)
+                if not hasattr(self, '_idx_cache_bs') or self._idx_cache_bs != batch_size:
+                    self._cached_gb_idcs = torch.arange(batch_size, device=displacements.device).repeat_interleave(self.stiffs.nels*(self.stiffs.ndof**2))
+                    self._cached_gae_ext = self.stiffs.glob_assembler_idcs.unsqueeze(0).repeat(batch_size, 1, 1, 1).contiguous()
+                    self._cached_gae_flat_0 = self._cached_gae_ext[:,:,:,0].flatten()
+                    self._cached_gae_flat_1 = self._cached_gae_ext[:,:,:,1].flatten()
+                    neq = self.stiffs.neq
+                    # Precomputed flat scatter index for variant d (also useful as raw for variant c)
+                    self._cached_scatter_flat_idx = (self._cached_gb_idcs * neq * neq) + (self._cached_gae_flat_0 * neq) + self._cached_gae_flat_1
+                    self._idx_cache_bs = batch_size
+                global_batch_idcs = self._cached_gb_idcs
+                glob_assembler_idcs_ext = self._cached_gae_ext
+                gae_flat_0 = self._cached_gae_flat_0
+                gae_flat_1 = self._cached_gae_flat_1
             else:
-                neq = self.stiffs.neq
-                flat_idx = (global_batch_idcs * neq * neq) + (gae_flat_0 * neq) + gae_flat_1
-            k_flat = torch.zeros(batch_size * self.stiffs.neq * self.stiffs.neq, dtype=displacements.dtype, device=displacements.device)
-            k_flat.scatter_add_(0, flat_idx, scaled_kloc_val.flatten())
-            k_closed_glob_vec_batched = k_flat.view(batch_size, self.stiffs.neq, self.stiffs.neq)
-        else:
-            k_closed_glob_vec_batched_temp = torch.zeros((batch_size, self.stiffs.neq, self.stiffs.neq), dtype = displacements.dtype, device = displacements.device)
-            k_closed_glob_vec_batched = k_closed_glob_vec_batched_temp.index_put((global_batch_idcs.flatten(), gae_flat_0, gae_flat_1), scaled_kloc_val.flatten(), accumulate=True)
-        load_x_stiff = self.stiffs.image_to_stiffness_coord(load_x.squeeze(1), 0)
-        load_y_stiff = self.stiffs.image_to_stiffness_coord(load_y.squeeze(1), 1)
-        f_glob = load_x_stiff+load_y_stiff
+                global_batch_idcs = torch.arange(batch_size).repeat_interleave(self.stiffs.nels*(self.stiffs.ndof**2)).to(displacements.device)
+                glob_assembler_idcs_ext = self.stiffs.glob_assembler_idcs.unsqueeze(0).repeat(batch_size, 1, 1, 1)
+                gae_flat_0 = glob_assembler_idcs_ext[:,:,:,0].flatten()
+                gae_flat_1 = glob_assembler_idcs_ext[:,:,:,1].flatten()
+        if not _opt16_mf:
+            # scale the local stiffness matrices (which is constant) over the batch
+            scaled_kloc = self.stiffs.tot_local_stiffness.unsqueeze(0) * rho_flatten[:, :, None, None]
+            # extract the values according to dofs
+            scaled_kloc_val = scaled_kloc[:, :, self.stiffs.indices_ext[:,0], self.stiffs.indices_ext[:,1]]
+            # assemble global stiffness matrix
+            if _OPT8_VARIANT in ('b', 'd'):
+                # opt8b/d: scatter_add_ on a flat tensor (faster than index_put_(accumulate=True))
+                if _OPT8_VARIANT == 'd':
+                    flat_idx = self._cached_scatter_flat_idx
+                else:
+                    neq = self.stiffs.neq
+                    flat_idx = (global_batch_idcs * neq * neq) + (gae_flat_0 * neq) + gae_flat_1
+                k_flat = torch.zeros(batch_size * self.stiffs.neq * self.stiffs.neq, dtype=displacements.dtype, device=displacements.device)
+                k_flat.scatter_add_(0, flat_idx, scaled_kloc_val.flatten())
+                k_closed_glob_vec_batched = k_flat.view(batch_size, self.stiffs.neq, self.stiffs.neq)
+            else:
+                k_closed_glob_vec_batched_temp = torch.zeros((batch_size, self.stiffs.neq, self.stiffs.neq), dtype = displacements.dtype, device = displacements.device)
+                k_closed_glob_vec_batched = k_closed_glob_vec_batched_temp.index_put((global_batch_idcs.flatten(), gae_flat_0, gae_flat_1), scaled_kloc_val.flatten(), accumulate=True)
+            load_x_stiff = self.stiffs.image_to_stiffness_coord(load_x.squeeze(1), 0)
+            load_y_stiff = self.stiffs.image_to_stiffness_coord(load_y.squeeze(1), 1)
+            f_glob = load_x_stiff+load_y_stiff
 
-        BC_node_x_stiff = self.stiffs.image_to_stiffness_coord(bc_x.squeeze(1), 0)
-        BC_node_y_stiff = self.stiffs.image_to_stiffness_coord(bc_y.squeeze(1), 1)
+            BC_node_x_stiff = self.stiffs.image_to_stiffness_coord(bc_x.squeeze(1), 0)
+            BC_node_y_stiff = self.stiffs.image_to_stiffness_coord(bc_y.squeeze(1), 1)
 
-        # replace rows in stiffness matrix that are defined with BCs with 1 at diagonal and 0 elsewhere
-        # Identify the indices where BC_node_x_stiff and BC_node_y_stiff are not zero
-        mask = BC_node_x_stiff+BC_node_y_stiff != 0
-        # Zero out the rows where the mask is True
-        mask_ext = mask.unsqueeze(-1).expand_as(k_closed_glob_vec_batched)
-        k_closed_glob_vec_batched[mask_ext] = 0
-        # create mask that is True where mask is False and if on diagonal
-        identity = self.stiffs.eye_neq.unsqueeze(0).expand(batch_size, -1, -1)
-        identity_masked = identity * mask_ext
-        # Set the diagonal elements to 1 where the mask is True
-        k_closed_glob_vec_batched += identity_masked
-        # Set the corresponding elements in f_glob to 0
-        f_glob[mask] = 0
+            # replace rows in stiffness matrix that are defined with BCs with 1 at diagonal and 0 elsewhere
+            # Identify the indices where BC_node_x_stiff and BC_node_y_stiff are not zero
+            mask = BC_node_x_stiff+BC_node_y_stiff != 0
+            # Zero out the rows where the mask is True
+            mask_ext = mask.unsqueeze(-1).expand_as(k_closed_glob_vec_batched)
+            k_closed_glob_vec_batched[mask_ext] = 0
+            # create mask that is True where mask is False and if on diagonal
+            identity = self.stiffs.eye_neq.unsqueeze(0).expand(batch_size, -1, -1)
+            identity_masked = identity * mask_ext
+            # Set the diagonal elements to 1 where the mask is True
+            k_closed_glob_vec_batched += identity_masked
+            # Set the corresponding elements in f_glob to 0
+            f_glob[mask] = 0
 
-        residual = ein.einsum(k_closed_glob_vec_batched, displacements_stiff, 'b i j, b j -> b i') - f_glob
-        
+            residual = ein.einsum(k_closed_glob_vec_batched, displacements_stiff, 'b i j, b j -> b i') - f_glob
+
         output = {}
         output['residual'] = residual
 
@@ -304,7 +334,11 @@ class ResidualsMechanics:
 
         if return_optimizer:
             # compliance = ein.einsum(displacements_stiff, f_glob, 'b i, b i -> b')
-            compliance = ein.einsum(displacements_stiff, k_closed_glob_vec_batched, displacements_stiff, 'b i, b i j, b j -> b') # NOTE this works much better since this is not sparse
+            if _opt16_mf:
+                # uᵀ K_mod u = uᵀ (K_mod u); ku already includes the identity BC rows
+                compliance = ein.einsum(displacements_stiff, ku, 'b i, b i -> b')
+            else:
+                compliance = ein.einsum(displacements_stiff, k_closed_glob_vec_batched, displacements_stiff, 'b i, b i j, b j -> b') # NOTE this works much better since this is not sparse
             # compliance = -ein.einsum(displacements_stiff.detach(), k_closed_glob_vec_batched, displacements_stiff.detach(), 'b i, b i j, b j -> b') # HACK see NTopo
             output['optimizer'] = compliance
 
@@ -323,6 +357,11 @@ class ResidualsMechanics:
 
         with torch.no_grad():
             if self.topopt_eval and sample:
+                if _opt16_mf:
+                    # dense indices skipped on the matrix-free path; this eval block (rare, no_grad)
+                    # still assembles dense K for linalg.solve
+                    global_batch_idcs = torch.arange(batch_size).repeat_interleave(self.stiffs.nels*(self.stiffs.ndof**2)).to(displacements.device)
+                    glob_assembler_idcs_ext = self.stiffs.glob_assembler_idcs.unsqueeze(0).repeat(batch_size, 1, 1, 1)
                 solution = input_tuple[3]
                 opt_disp = solution[:, :2]
                 rho_simp = solution[:, 2,:-1, :-1] # remove padding here
