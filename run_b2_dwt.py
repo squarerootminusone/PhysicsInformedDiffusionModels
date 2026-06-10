@@ -2,12 +2,18 @@
 plateau LR + bf16) with the Haar-DWT high-frequency-weighted data loss (hf_loss_weight=1.0).
 Compare against B0 (same recipe, hf_loss_weight=0).
 """
-import json, subprocess, sys, statistics
+import json, os, subprocess, sys, statistics
+
+# wandb tracking (key via `wandb login` netrc); record the launch commit per CLAUDE.md rule
+try:
+    os.environ.setdefault('WANDB_GIT_COMMIT', open('/root/PIDM_GIT_SHA').read().strip())
+except OSError:
+    pass
 
 base = dict(config_path='configs/darcy_pidm_me.yaml', train_iterations=50000, bf16_train=True,
             async_eval=True, sample_freq=10 ** 9, final_sample=False, sample_eval_freq=5000,
             test_eval_freq=500, c_residual=0.00374, lr_schedule='plateau',
-            save_final_checkpoint=True, wandb_track=False, model_dim=64, diff_steps=50,
+            save_final_checkpoint=True, wandb_track=True, model_dim=64, diff_steps=50,
             hf_loss_weight=1.0)
 
 objs = []
