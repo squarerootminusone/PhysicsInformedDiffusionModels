@@ -445,10 +445,14 @@ class DenoisingDiffusion(nn.Module):
         
         # model output
         # evaluate residuals at last timestep if required
+        extra_kwargs = {}
         if residual_func.gov_eqs == 'darcy':
             residual_input = (model_input, )
             sample = True
-        if residual_func.gov_eqs == 'mechanics':       
+            # opt15: the FD residual at intermediate sampling steps is discarded — only compute
+            # it at the final step when it is actually consumed (corrections re-evaluate anyway)
+            extra_kwargs['skip_residual'] = not (t[0] == 0 and eval_residuals)
+        if residual_func.gov_eqs == 'mechanics':
             vf = conditioning[:,0,0,0]
             # vf = x_0[:,2].mean((1,2))
             residual_input = (model_input, bcs, vf, solution)
@@ -462,7 +466,8 @@ class DenoisingDiffusion(nn.Module):
                                                     return_optimizer = return_optimizer,
                                                     return_inequality = return_inequality,
                                                     sample = sample,
-                                                    ddim_func = self.ddim_sample_x0)
+                                                    ddim_func = self.ddim_sample_x0,
+                                                    **extra_kwargs)
         
         output, residual = out_dict['model_out'], out_dict['residual']
         model_out = output

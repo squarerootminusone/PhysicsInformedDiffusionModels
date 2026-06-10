@@ -107,7 +107,7 @@ class ResidualsDarcy:
         result[torch.logical_and(condition2, condition4)] = -r
         return result
 
-    def compute_residual(self, input, reduce = 'none', return_model_out = False, return_optimizer = False, return_inequality = False, sample = False, ddim_func = None, pass_through = False):
+    def compute_residual(self, input, reduce = 'none', return_model_out = False, return_optimizer = False, return_inequality = False, sample = False, ddim_func = None, pass_through = False, skip_residual = False):
 
         if pass_through:
             assert isinstance(input, torch.Tensor), 'Input is assumed to directly be given output.'
@@ -137,7 +137,12 @@ class ResidualsDarcy:
 
         assert len(x0_pred.shape) == 4, 'Model output must be a tensor shaped as an image (with explicit axes for the spatial dimensions).'
         batch_size, output_dim, pixels_per_dim, pixels_per_dim = x0_pred.shape
-        
+
+        # opt15: sampling discards the residual at all steps except the last — skip the FD work
+        if skip_residual:
+            return {'residual': None, 'model_out': model_out}
+
+
         p = x0_pred[:, 0]
         permeability_field = x0_pred[:, 1]
         p_d0 = self.grads.stencil_gradients(p, mode='d_d0')
