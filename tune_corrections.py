@@ -92,6 +92,7 @@ study = optuna.create_study(study_name=args.study, storage=args.storage, load_if
                             directions=['minimize', 'minimize'],
                             sampler=NSGAIISampler(population_size=12, seed=0))
 study.enqueue_trial({'N_correction': 0, 'correction_mode': 'xt'})       # uncorrected baseline anchor
+study.enqueue_trial({'N_correction': 60, 'correction_mode': 'x0'})      # prior sweep's Pareto-best anchor
 study.optimize(objective, n_trials=args.n_trials)
 
 print('=== PARETO FRONT (residual vs sliced-Wasserstein) ===', flush=True)
