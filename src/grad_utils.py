@@ -41,6 +41,10 @@ class StencilGradientComputation(nn.Module):
                     self.max_inner_offset = max(self.max_inner_offset, abs(i), abs(j))
                 else:
                     self.max_offset = max(self.max_offset, abs(i), abs(j))
+        # plain Python ints: findiff yields numpy ints, which torch.compile traces as dynamic
+        # scalars (Inductor fails on F.pad with `_local_scalar_dense`)
+        self.max_inner_offset = int(self.max_inner_offset)
+        self.max_offset = int(self.max_offset)
         self.max_inner_kernel_size = 2*self.max_inner_offset + 1 # include center and in both directions
         self.max_kernel_size = 2*self.max_offset + 1 # include center and in both directions
 
