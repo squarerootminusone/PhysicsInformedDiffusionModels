@@ -652,13 +652,33 @@ class DenoisingDiffusion(nn.Module):
 
         return loss.mean(-1)
 
+    def _dwt_hf_weight(self, target, lam):
+        """B2 (PG-Diff-style): per-pixel data-loss weight from single-level Haar high-frequency
+        energy of the target — upweights sharp interfaces (where the Darcy residual error
+        concentrates). Per-sample-per-channel normalized to mean 1 so the overall data-loss
+        scale (and thus the c_residual balance) is unchanged."""
+        B, C, H, W = target.shape
+        if not hasattr(self, '_haar_hf_k') or self._haar_hf_k.device != target.device:
+            lh = [[0.5, 0.5], [-0.5, -0.5]]
+            hl = [[0.5, -0.5], [0.5, -0.5]]
+            hh = [[0.5, -0.5], [-0.5, 0.5]]
+            self._haar_hf_k = torch.tensor([[lh], [hl], [hh]], device=target.device)
+        k = self._haar_hf_k.to(target.dtype)
+        e = F.conv2d(target.detach().reshape(B * C, 1, H, W), k, stride=2)
+        e = (e ** 2).sum(dim=1, keepdim=True)
+        e = F.interpolate(e, size=(H, W), mode='nearest').reshape(B, C, H, W)
+        e = e / e.mean(dim=(2, 3), keepdim=True).clamp_min(1e-12)
+        w = 1. + lam * e
+        return w / w.mean(dim=(2, 3), keepdim=True)
+
     def model_estimation_loss(self,
                               input,
-                              residual_func = None, 
+                              residual_func = None,
                               c_data = 1.,
                               c_residual = 0.,
-                              c_ineq = 0., 
-                              lambda_opt = 0.):
+                              c_ineq = 0.,
+                              lambda_opt = 0.,
+                              hf_loss_weight = 0.):
 
         batch_size = len(input)
         t = torch.randint(0, self.n_steps, size=(batch_size,), device=input.device)
@@ -711,6 +731,8 @@ class DenoisingDiffusion(nn.Module):
         target = x_0
         loss_fn = nn.MSELoss(reduction='none')
         loss = loss_fn(target, output)
+        if hf_loss_weight > 0 and target.ndim == 4:
+            loss = loss * self._dwt_hf_weight(target, hf_loss_weight)
         loss = reduce(loss, 'b ... -> b (...)', 'mean')
         loss = loss * extract(self.diff_dict['p2_loss_weight'], t, loss)
         loss = loss.mean()
