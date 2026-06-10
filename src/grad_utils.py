@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -157,6 +158,11 @@ class StencilGradients(nn.Module):
         self.d_d00 = StencilGradientComputation(FinDiff(0, d0, 2, acc=fd_acc).stencil((99,99)).data, periodic, device)
         self.d_d11 = StencilGradientComputation(FinDiff(1, d1, 2, acc=fd_acc).stencil((99,99)).data, periodic, device)
         self.d_d01 = StencilGradientComputation(FinDiff((0, d0, 1), (1, d1, 1), acc=fd_acc).stencil((99, 99)).data, periodic, device)
+        # opt15: each stencil eval launches ~20 small kernels (interior conv + 8 boundary convs +
+        # slice writes); Inductor fuses them. Numerics: same fp32 convs, verify vs eager.
+        if os.environ.get('OPT15_COMPILE_FD', '') == '1':
+            for _name in ('d_d0', 'd_d1', 'd_d00', 'd_d11', 'd_d01'):
+                setattr(self, _name, torch.compile(getattr(self, _name), mode='default'))
 
     def forward(self, x, mode):
         if mode == 'all':
