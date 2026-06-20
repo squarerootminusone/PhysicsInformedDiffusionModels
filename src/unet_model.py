@@ -478,18 +478,26 @@ class Unet3D(nn.Module):
         # modules for all layers
         # full_spatial_attn: per-level spatial attention as full quadratic Attention (same wrapping as
         # the bottleneck mid_spatial_attn) instead of the linear-complexity SpatialLinearAttention.
-        def make_spatial_attn(d):
-            if full_spatial_attn:
+        # Full attention is O((H*W)^2) and only affordable at coarse resolutions — at the 64x64 top
+        # level the [B,heads,4096,4096] score matrix is ~32 GB at batch 64 (OOM). So gate full
+        # attention to resolutions <= full_attn_max_res (standard ADM/EDM practice); finer levels
+        # keep the linear SpatialLinearAttention. base image size assumed 64 for this project.
+        base_res = 64
+        full_attn_max_res = 32
+
+        def make_spatial_attn(d, res):
+            if full_spatial_attn and res <= full_attn_max_res:
                 return EinopsToAndFrom('b c f h w', 'b f (h w) c', Attention(d, heads = attn_heads, cond_dim = self.cond_dim))
             return SpatialLinearAttention(d, heads = attn_heads, cond_dim = self.cond_dim)
 
         for ind, (dim_in, dim_out) in enumerate(in_out):
             is_last = ind >= (num_resolutions - 1)
+            level_res = base_res // (2 ** ind)   # attention runs before the Downsample at this level
 
             self.downs.append(nn.ModuleList([
                 block_klass_cond(dim_in, dim_out),
                 block_klass_cond(dim_out, dim_out),
-                Residual(PreNorm(dim_out, make_spatial_attn(dim_out))) if use_sparse_linear_attn else nn.Identity(),
+                Residual(PreNorm(dim_out, make_spatial_attn(dim_out, level_res))) if use_sparse_linear_attn else nn.Identity(),
                 Downsample(dim_out, self.padding_mode) if not is_last else nn.Identity()
             ]))
 
@@ -505,11 +513,12 @@ class Unet3D(nn.Module):
 
         for ind, (dim_in, dim_out) in enumerate(reversed(in_out)):
             is_last = ind >= (num_resolutions - 1)
+            level_res = base_res // (2 ** (num_resolutions - 1 - ind))   # ups go coarse->fine
 
             self.ups.append(nn.ModuleList([
                 block_klass_cond(dim_out * 2, dim_in),
                 block_klass_cond(dim_in, dim_in),
-                Residual(PreNorm(dim_in, make_spatial_attn(dim_in))) if use_sparse_linear_attn else nn.Identity(),
+                Residual(PreNorm(dim_in, make_spatial_attn(dim_in, level_res))) if use_sparse_linear_attn else nn.Identity(),
                 Upsample(dim_in, self.padding_mode) if not is_last else nn.Identity()
             ]))
 
