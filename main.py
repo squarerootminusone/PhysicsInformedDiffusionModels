@@ -35,10 +35,12 @@ DEFAULTS = dict(
     async_eval=True,            # run the periodic validation eval off the training critical path
     # --- tunable hyperparameters ---
     lr=1.0e-4,
-    lr_schedule=None,           # None or 'plateau': ReduceLROnPlateau on a rolling loss average
+    lr_schedule=None,           # None | 'plateau' (ReduceLROnPlateau on rolling loss) | 'step' (fixed StepLR)
     lr_plateau_factor=0.5,      # lr *= factor when the rolling loss plateaus
     lr_plateau_patience=5,      # scheduler steps (of lr_sched_freq each) w/o improvement before decay
     lr_plateau_threshold=1e-3,  # relative-improvement threshold for "no improvement"
+    lr_step_size=40000,         # 'step' schedule: halve LR every this many iterations
+    lr_step_gamma=0.5,          # 'step' schedule: LR multiplier at each step
     lr_min=1e-6,
     lr_window=50,               # rolling average over this many logged-loss samples
     lr_sched_freq=500,          # iterations between scheduler.step(rolling_avg)
@@ -421,6 +423,10 @@ def train(overrides=None, trial=None):
             patience=p['lr_plateau_patience'], threshold=p['lr_plateau_threshold'],
             min_lr=p['lr_min'])
         loss_window = deque(maxlen=p['lr_window'])
+    elif p['lr_schedule'] == 'step':
+        # fixed schedule: LR *= lr_step_gamma every lr_step_size iterations (stepped once per iter)
+        scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer, step_size=p['lr_step_size'], gamma=p['lr_step_gamma'])
 
     if wandb_track:
         import wandb
@@ -672,16 +678,20 @@ def train(overrides=None, trial=None):
                 if lambda_opt > 0:
                     log_fn({'loss_optimization': float(opt_loss)}, step=iteration)
                 if scheduler is not None:
-                    loss_window.append(loss_val)
+                    if loss_window is not None:
+                        loss_window.append(loss_val)
                     log_fn({'lr': optimizer.param_groups[0]['lr']}, step=iteration)  # dense for plotting
                 if batch_schedule:
                     log_fn({'batch_size': cur_bs}, step=iteration)
 
             # LR plateau schedule driven by the rolling loss average
-            if scheduler is not None and iteration % p['lr_sched_freq'] == 0 and loss_window:
+            if p['lr_schedule'] == 'plateau' and scheduler is not None and iteration % p['lr_sched_freq'] == 0 and loss_window:
                 rolling = sum(loss_window) / len(loss_window)
                 scheduler.step(rolling)
                 log_fn({'loss_rolling': rolling}, step=iteration)
+            # fixed step schedule: advance once per iteration so StepLR halves every lr_step_size iters
+            elif p['lr_schedule'] == 'step' and scheduler is not None:
+                scheduler.step()
 
             # ema update
             if iteration > ema_start:
