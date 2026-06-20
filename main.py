@@ -52,6 +52,7 @@ DEFAULTS = dict(
     diff_steps=None,            # None -> from yaml config
     fd_acc=None,                # None -> from yaml config
     model_dim=None,             # None -> per-gov_eqs default (darcy 32 / mechanics 128)
+    full_spatial_attn=False,    # per-level full quadratic spatial attention (vs linear SpatialLinearAttention)
     batch_size=None,            # None -> per-gov_eqs default
     batch_schedule=None,        # optional {iter: batch_size} ramp (e.g. {0:64, 22000:128, 35000:256})
     fd_acc_schedule=None,       # optional {iter: fd_acc} ramp, darcy only (e.g. {25000: 4})
@@ -380,9 +381,11 @@ def train(overrides=None, trial=None):
     def build_model():
         if gov_eqs == 'darcy':
             m = Unet3D(dim=model_dim, channels=output_dim,
+                       full_spatial_attn=p['full_spatial_attn'],
                        sigmoid_last_channel=sigmoid_last_channel)
         else:
             m = Unet3D(dim=model_dim, channels=output_dim + 3 + 4, out_dim=output_dim,
+                       full_spatial_attn=p['full_spatial_attn'],
                        sigmoid_last_channel=sigmoid_last_channel)
         return m.to(device)
 

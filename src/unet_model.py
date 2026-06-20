@@ -410,6 +410,7 @@ class Unet3D(nn.Module):
         init_dim = None,
         init_kernel_size = 7,
         use_sparse_linear_attn = True,
+        full_spatial_attn = False,   # replace per-level SpatialLinearAttention with full quadratic Attention
         resnet_groups = 8,
         cond_bias = False,
         cond_attention = 'none', # 'none', 'self-stacked', 'cross', 'self-cross/spatial'
@@ -475,13 +476,20 @@ class Unet3D(nn.Module):
         block_klass_cond = partial(block_klass, time_emb_dim = time_dim + int(self.cond_dim or 0) if self.cond_to_time == 'concat' else self.cond_dim)
 
         # modules for all layers
+        # full_spatial_attn: per-level spatial attention as full quadratic Attention (same wrapping as
+        # the bottleneck mid_spatial_attn) instead of the linear-complexity SpatialLinearAttention.
+        def make_spatial_attn(d):
+            if full_spatial_attn:
+                return EinopsToAndFrom('b c f h w', 'b f (h w) c', Attention(d, heads = attn_heads, cond_dim = self.cond_dim))
+            return SpatialLinearAttention(d, heads = attn_heads, cond_dim = self.cond_dim)
+
         for ind, (dim_in, dim_out) in enumerate(in_out):
             is_last = ind >= (num_resolutions - 1)
 
             self.downs.append(nn.ModuleList([
                 block_klass_cond(dim_in, dim_out),
                 block_klass_cond(dim_out, dim_out),
-                Residual(PreNorm(dim_out, SpatialLinearAttention(dim_out, heads = attn_heads, cond_dim = self.cond_dim))) if use_sparse_linear_attn else nn.Identity(),
+                Residual(PreNorm(dim_out, make_spatial_attn(dim_out))) if use_sparse_linear_attn else nn.Identity(),
                 Downsample(dim_out, self.padding_mode) if not is_last else nn.Identity()
             ]))
 
@@ -501,7 +509,7 @@ class Unet3D(nn.Module):
             self.ups.append(nn.ModuleList([
                 block_klass_cond(dim_out * 2, dim_in),
                 block_klass_cond(dim_in, dim_in),
-                Residual(PreNorm(dim_in, SpatialLinearAttention(dim_in, heads = attn_heads, cond_dim = self.cond_dim))) if use_sparse_linear_attn else nn.Identity(),
+                Residual(PreNorm(dim_in, make_spatial_attn(dim_in))) if use_sparse_linear_attn else nn.Identity(),
                 Upsample(dim_in, self.padding_mode) if not is_last else nn.Identity()
             ]))
 
