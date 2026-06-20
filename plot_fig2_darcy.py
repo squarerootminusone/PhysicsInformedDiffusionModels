@@ -22,13 +22,9 @@ Metric note:
       For PIDM-SE: data_loss dominates (c_residual tiny), good proxy.
       For PIDM-ME: loss_test is inflated by the physics penalty.
 
-  Subplot (a) — residual RMAE proxy:
-      For PIDM-ME / PIDM-SE: loss_test is dominated by the residual penalty
-      at early training (3.85e6 and 1.2e4 respectively at t=0), and decreases
-      as the model learns to satisfy the PDE — a meaningful proxy for residual
-      learning dynamics even though it is not identical to RMAE.
-      For Diffusion / PG / CoCoGen: loss_test = data_loss (no residual signal),
-      shown for reference — their curves reflect data quality, not PDE compliance.
+  Subplot (a) — residual RMAE:
+      PIDM-ME and PIDM-SE only, using the explicit residual field from
+      new-format logs: "[iter N] test_loss: X residual: X".
 """
 
 import re
@@ -89,6 +85,25 @@ MODELS = [
     },
 ]
 
+# PIDM-ME and PIDM-SE from newer runs that emit explicit residual RMAE.
+# Used only for subplot (a).
+RESIDUAL_MODELS = [
+    {
+        'name':  'PIDM-ME',
+        'file':  'pidm_darcy_pidm_me_10244029.out',
+        'color': '#ff7f0e',   # orange — matches paper
+        'ls':    (0, (3, 1, 1, 1)),
+        'lw':    1.8,
+    },
+    {
+        'name':  'PIDM-SE',
+        'file':  'pidm_darcy_pidm_se_10244030.out',
+        'color': '#e377c2',   # pink/magenta — matches paper
+        'ls':    ':',
+        'lw':    1.8,
+    },
+]
+
 SMOOTH_WINDOW = 15       # rolling-mean window (number of log-points, each 500 iters)
 SKIP_ITERS   = 3         # drop first N log-points (iters 0/500/1000 — not yet converged)
 
@@ -110,6 +125,22 @@ def parse_log(filepath: str):
     return np.array(iters, dtype=float), np.array(losses, dtype=float)
 
 
+def parse_log_new(filepath: str):
+    """Return (iterations, test_loss, residual) from '[iter N] test_loss: X residual: X' logs."""
+    pattern = re.compile(
+        r'\[iter\s+(\d+)\]\s+test_loss:\s*([0-9.eE+\-]+)\s+residual:\s*([0-9.eE+\-]+)'
+    )
+    iters, losses, residuals = [], [], []
+    with open(filepath) as fh:
+        for line in fh:
+            m = pattern.search(line)
+            if m:
+                iters.append(int(m.group(1)))
+                losses.append(float(m.group(2)))
+                residuals.append(float(m.group(3)))
+    return np.array(iters, dtype=float), np.array(losses, dtype=float), np.array(residuals, dtype=float)
+
+
 def rolling_mean(arr: np.ndarray, window: int) -> np.ndarray:
     """Causal rolling mean; edges filled with cumulative mean to avoid phase lag."""
     out = np.empty_like(arr)
@@ -128,32 +159,40 @@ def main():
     fig, axes = plt.subplots(1, 2, figsize=(10, 4.2))
     fig.subplots_adjust(wspace=0.38)
 
+    # ── (a) Residual RMAE — PIDM-ME and PIDM-SE only ────────────────────
+    for m in RESIDUAL_MODELS:
+        path = os.path.join(LOG_DIR, m['file'])
+        iters, _, residuals = parse_log_new(path)
+
+        iters     = iters[SKIP_ITERS:]
+        residuals = residuals[SKIP_ITERS:]
+
+        residuals_sm = rolling_mean(residuals, SMOOTH_WINDOW)
+        x = iters / 1e3
+
+        axes[0].semilogy(x, residuals_sm,
+                         color=m['color'], linestyle=m['ls'], linewidth=m['lw'],
+                         label=m['name'])
+
+    # ── (b) Test data loss — all 5 models ───────────────────────────────
     for m in MODELS:
         path = os.path.join(LOG_DIR, m['file'])
         iters, losses = parse_log(path)
 
-        # Drop initial pathological points (model not yet trained)
         iters  = iters[SKIP_ITERS:]
         losses = losses[SKIP_ITERS:]
 
         losses_sm = rolling_mean(losses, SMOOTH_WINDOW)
-        x = iters / 1e3   # display in thousands
+        x = iters / 1e3
 
-        kwargs = dict(color=m['color'], linestyle=m['ls'], linewidth=m['lw'],
-                      label=m['name'])
-
-        # ── (a) Residual RMAE proxy ──────────────────────────────────────
-        # axes[0].semilogy(x, losses_sm, **kwargs)
-
-        # ── (b) Test data loss ───────────────────────────────────────────
-        # Exact for Diffusion / PG / CoCoGen.  PIDM-ME slightly inflated by
-        # physics penalty; PIDM-SE is a good proxy (c_residual = 1e-5).
-        axes[1].semilogy(x, losses_sm, **kwargs)
+        axes[1].semilogy(x, losses_sm,
+                         color=m['color'], linestyle=m['ls'], linewidth=m['lw'],
+                         label=m['name'])
 
     # ── Axis formatting ──────────────────────────────────────────────────
 
     for ax, letter, ylabel in [
-        # (axes[0], 'a', 'Residual Error RMAE'),
+        (axes[0], 'a', 'Residual Error RMAE'),
         (axes[1], 'b', 'Test Data Loss'),
     ]:
         ax.set_xlabel('Training Iterations (×10³)', fontsize=11)
@@ -165,20 +204,8 @@ def main():
         ax.grid(True, which='major', linestyle='--', linewidth=0.5, alpha=0.5)
         ax.grid(True, which='minor', linestyle=':', linewidth=0.3, alpha=0.3)
 
-    # Legend on subplot (b) only to avoid repetition
+    axes[0].legend(fontsize=9, loc='upper right', framealpha=0.85)
     axes[1].legend(fontsize=9, loc='upper right', framealpha=0.85)
-
-    # Annotation explaining the RMAE proxy on subplot (a)
-    # axes[0].text(
-    #     0.98, 0.98,
-    #     'Proxy: stdout test loss\n'
-    #     '(wandb RMAE not in logs)\n'
-    #     'c_res=0 models: data loss only',
-    #     transform=axes[0].transAxes,
-    #     fontsize=6.5, color='#555555',
-    #     ha='right', va='top',
-    #     bbox=dict(boxstyle='round,pad=0.3', fc='white', ec='#cccccc', alpha=0.8),
-    # )
 
     plt.tight_layout()
 
