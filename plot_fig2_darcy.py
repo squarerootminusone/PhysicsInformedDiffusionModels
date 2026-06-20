@@ -17,7 +17,7 @@ Metric note:
   For PIDM-ME (c_residual = 0.001) and PIDM-SE (c_residual = 1e-5):
       loss_test = data_loss + c_residual * gaussian_nll(residual)   [combined]
 
-  Subplot (b) — test     data loss:
+  Subplot (b) — test data loss:
       For c_residual=0 models: loss_test IS the data loss (exact).
       For PIDM-SE: data_loss dominates (c_residual tiny), good proxy.
       For PIDM-ME: loss_test is inflated by the physics penalty.
@@ -143,10 +143,7 @@ def main():
                       label=m['name'])
 
         # ── (a) Residual RMAE proxy ──────────────────────────────────────
-        # For PIDM-ME / PIDM-SE: combined loss is dominated by the residual
-        # penalty, so it tracks physics learning dynamics.
-        # For Diffusion / PG / CoCoGen: combined loss = data loss (c_residual=0).
-        axes[0].semilogy(x, losses_sm, **kwargs)
+        # axes[0].semilogy(x, losses_sm, **kwargs)
 
         # ── (b) Test data loss ───────────────────────────────────────────
         # Exact for Diffusion / PG / CoCoGen.  PIDM-ME slightly inflated by
@@ -156,7 +153,7 @@ def main():
     # ── Axis formatting ──────────────────────────────────────────────────
 
     for ax, letter, ylabel in [
-        (axes[0], 'a', 'Residual Error RMAE'),
+        # (axes[0], 'a', 'Residual Error RMAE'),
         (axes[1], 'b', 'Test Data Loss'),
     ]:
         ax.set_xlabel('Training Iterations (×10³)', fontsize=11)
@@ -172,16 +169,16 @@ def main():
     axes[1].legend(fontsize=9, loc='upper right', framealpha=0.85)
 
     # Annotation explaining the RMAE proxy on subplot (a)
-    axes[0].text(
-        0.98, 0.98,
-        'Proxy: stdout test loss\n'
-        '(wandb RMAE not in logs)\n'
-        'c_res=0 models: data loss only',
-        transform=axes[0].transAxes,
-        fontsize=6.5, color='#555555',
-        ha='right', va='top',
-        bbox=dict(boxstyle='round,pad=0.3', fc='white', ec='#cccccc', alpha=0.8),
-    )
+    # axes[0].text(
+    #     0.98, 0.98,
+    #     'Proxy: stdout test loss\n'
+    #     '(wandb RMAE not in logs)\n'
+    #     'c_res=0 models: data loss only',
+    #     transform=axes[0].transAxes,
+    #     fontsize=6.5, color='#555555',
+    #     ha='right', va='top',
+    #     bbox=dict(boxstyle='round,pad=0.3', fc='white', ec='#cccccc', alpha=0.8),
+    # )
 
     plt.tight_layout()
 
