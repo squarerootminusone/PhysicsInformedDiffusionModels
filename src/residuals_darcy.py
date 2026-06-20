@@ -145,13 +145,18 @@ class ResidualsDarcy:
 
         p = x0_pred[:, 0]
         permeability_field = x0_pred[:, 1]
-        p_d0 = self.grads.stencil_gradients(p, mode='d_d0')
-        p_d1 = self.grads.stencil_gradients(p, mode='d_d1')
+        # opt15b: batch p and K through the shared d_d0 / d_d1 operators in one grouped conv each
+        # (StencilGradientComputation already convolves each channel independently with the same
+        # kernel via groups=channels), cutting the FD path from 6 stencil calls to 4 — bit-identical
+        # to the per-field calls. d_d00 / d_d11 are p-only and stay separate.
+        pk = x0_pred[:, :2]                                   # [B, 2, H, W] = stack(p, K)
+        pk_d0 = self.grads.stencil_gradients(pk, mode='d_d0')
+        pk_d1 = self.grads.stencil_gradients(pk, mode='d_d1')
+        p_d0, perm_d0 = pk_d0[:, 0], pk_d0[:, 1]
+        p_d1, perm_d1 = pk_d1[:, 0], pk_d1[:, 1]
         grad_p = torch.stack([p_d0, p_d1], dim=-3)
         p_d00 = self.grads.stencil_gradients(p, mode='d_d00')
         p_d11 = self.grads.stencil_gradients(p, mode='d_d11')
-        perm_d0 = self.grads.stencil_gradients(permeability_field, mode='d_d0')
-        perm_d1 = self.grads.stencil_gradients(permeability_field, mode='d_d1')
         velocity_jacobian = torch.zeros(batch_size, output_dim, self.input_dim, pixels_per_dim, pixels_per_dim, device=x0_pred.device, dtype=x0_pred.dtype)
         velocity_jacobian[:, 0, 0] = -permeability_field * p_d00 - perm_d0 * p_d0
         velocity_jacobian[:, 1, 1] = -permeability_field * p_d11 - perm_d1 * p_d1
