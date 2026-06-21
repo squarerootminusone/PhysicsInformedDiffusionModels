@@ -795,8 +795,9 @@ class DenoisingDiffusion(nn.Module):
         loss = reduce(loss, 'b ... -> b (...)', 'mean')
         loss = loss * extract(self.diff_dict['p2_loss_weight'], t, loss)
 
-        # per-sample data loss (shape [b]); kept un-reduced so importance weights apply per sample
-        data_loss_ps = c_data * loss
+        # per-sample data loss (shape [b]): reduce 'b ... -> b (...)' only flattens, so mean the
+        # flattened pixel dim here (the original code deferred this to the trailing .mean())
+        data_loss_ps = c_data * (loss.mean(dim=1) if loss.ndim > 1 else loss)
         # opt14: detached 0-dim tensors instead of .item() — each .item() forces a device
         # sync every iteration on this dispatch-bound workload; callers convert at log freq.
         data_loss_track = data_loss_ps.detach().mean()
