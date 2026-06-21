@@ -53,6 +53,7 @@ DEFAULTS = dict(
     fd_acc=None,                # None -> from yaml config
     model_dim=None,             # None -> per-gov_eqs default (darcy 32 / mechanics 128)
     full_spatial_attn=False,    # per-level full quadratic spatial attention (vs linear SpatialLinearAttention)
+    wandb_tags=None,            # optional list of wandb tags (e.g. for grouping a sweep in plots)
     batch_size=None,            # None -> per-gov_eqs default
     batch_schedule=None,        # optional {iter: batch_size} ramp (e.g. {0:64, 22000:128, 35000:256})
     fd_acc_schedule=None,       # optional {iter: fd_acc} ramp, darcy only (e.g. {25000: 4})
@@ -433,7 +434,7 @@ def train(overrides=None, trial=None):
 
     if wandb_track:
         import wandb
-        wandb.init(project='pi_diffusion', name=name)
+        wandb.init(project='pi_diffusion', name=name, tags=p.get('wandb_tags') or None)
         # Log ALL hyperparameters. `config={...}` passed to init was not persisting (empty
         # config in the run), so set it explicitly via config.update on the resolved params:
         # p (run/hyperparams) + config (yaml-sourced, with the actually-used c_residual etc.)
