@@ -61,6 +61,7 @@ def build_objective(args):
             diff_steps=args.diff_steps,
             lr_schedule=args.lr_schedule,
             lr_step_size=args.lr_step_size,
+            lr_step_burnin=args.lr_step_burnin,
             lr_step_gamma=0.5,
         )
         return run_trial_subprocess(overrides)
@@ -82,6 +83,7 @@ def main():
     ap.add_argument('--diff-steps', type=int, default=50)
     ap.add_argument('--lr-schedule', default='step')
     ap.add_argument('--lr-step-size', type=int, default=40000)
+    ap.add_argument('--lr-step-burnin', type=int, default=0)
     args = ap.parse_args()
 
     study = optuna.create_study(
