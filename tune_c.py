@@ -38,7 +38,9 @@ def run_trial_subprocess(overrides):
 
 
 def build_objective(args):
-    lo, hi = args.center / 10.0, args.center * 10.0
+    # explicit [--lo, --hi] overrides the center±10x scheme (for arbitrary-width ranges)
+    lo = args.lo if args.lo else args.center / 10.0
+    hi = args.hi if args.hi else args.center * 10.0
 
     def objective(trial):
         c_res = trial.suggest_float('c_residual', lo, hi, log=True)
@@ -72,7 +74,9 @@ def build_objective(args):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--config', required=True)
-    ap.add_argument('--center', type=float, required=True)
+    ap.add_argument('--center', type=float, default=1e-3)
+    ap.add_argument('--lo', type=float, default=None)   # explicit range lower bound (overrides center)
+    ap.add_argument('--hi', type=float, default=None)   # explicit range upper bound
     ap.add_argument('--tag', required=True)
     ap.add_argument('--study', required=True)
     ap.add_argument('--storage', default='sqlite:///pidm_optuna.db')
