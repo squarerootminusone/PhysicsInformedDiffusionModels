@@ -47,6 +47,8 @@ DEFAULTS = dict(
     lr_sched_freq=500,          # iterations between scheduler.step(rolling_avg)
     grad_clip=1.0,
     ema_decay=0.99,
+    load_checkpoint=None,       # path to a checkpoint_*.pt to warm-start from (loads EMA weights into the model)
+    start_iteration=0,          # offset added to the logged 'iteration' so a continuation plots contiguously
     c_data=None,                # None -> from yaml config
     c_residual=None,            # None -> from yaml config
     hf_loss_weight=0.,          # B2: Haar-DWT high-frequency upweighting of the data loss (0 = off)
@@ -410,6 +412,21 @@ def train(overrides=None, trial=None):
     # --- opt3-no-bf16: torch.compile (Inductor + CUDA Graphs) ---
     if p['compile_model']:
         model = torch.compile(model, mode=p['compile_mode'])
+    # warm-start from a prior checkpoint (the saved weights are the EMA model). Handle the
+    # torch.compile '_orig_mod.' prefix mismatch in either direction; fail loudly, not silently.
+    if p['load_checkpoint']:
+        _sd = torch.load(p['load_checkpoint'], map_location='cpu')['model']
+        _tgt = model.state_dict()
+        _tgt_c = any(k.startswith('_orig_mod.') for k in _tgt)
+        _sd_c = any(k.startswith('_orig_mod.') for k in _sd)
+        if _tgt_c and not _sd_c:
+            _sd = {f'_orig_mod.{k}': v for k, v in _sd.items()}
+        elif _sd_c and not _tgt_c:
+            _sd = {k.replace('_orig_mod.', '', 1): v for k, v in _sd.items()}
+        _missing, _unexpected = model.load_state_dict(_sd, strict=False)
+        assert not _unexpected and len(_missing) == 0, \
+            f'checkpoint mismatch: missing={_missing[:5]} unexpected={_unexpected[:5]}'
+        print(f"[resume] warm-started from {p['load_checkpoint']} (start_iteration={p['start_iteration']})", flush=True)
     ema.register(model)
     num_params = sum(pp.numel() for pp in model.parameters() if pp.requires_grad)
     print(f'Number of trainable parameters: {num_params}')
@@ -477,7 +494,7 @@ def train(overrides=None, trial=None):
 
         def log_fn(data, step):
             with _wandb_lock:
-                wandb.log({**data, 'iteration': step})
+                wandb.log({**data, 'iteration': step + p['start_iteration']})
     else:
         def log_fn(data, step=None):
             pass
