@@ -344,6 +344,51 @@ def extract(input, t, x):
     reshape = [t.shape[0]] + [1] * (len(shape) - 1)
     return out.reshape(*reshape)
 
+class LossSecondMomentResampler:
+    """Importance-sample diffusion timesteps by the running second moment of the
+    per-timestep loss (Nichol & Dhariwal, 'Improved DDPM', arXiv:2102.09672 Sec 3.3).
+
+    Draw t ~ p(t) ∝ sqrt(E[L_t^2]) instead of uniform, then reweight each term by
+    w(t) = (1/T) / p(t) so the estimator of the *uniform-t* objective stays unbiased
+    (the model sees the same loss in expectation; only the gradient variance drops).
+    Falls back to uniform sampling until every t has `history_per_term` observations."""
+    def __init__(self, n_steps, history_per_term=10, uniform_prob=0.001):
+        self.n_steps = n_steps
+        self.history_per_term = history_per_term
+        self.uniform_prob = uniform_prob
+        self._loss_history = np.zeros([n_steps, history_per_term], dtype=np.float64)
+        self._loss_counts = np.zeros([n_steps], dtype=np.int64)
+
+    def _warmed_up(self):
+        return bool((self._loss_counts == self.history_per_term).all())
+
+    def weights(self):
+        if not self._warmed_up():
+            return np.ones([self.n_steps], dtype=np.float64) / self.n_steps
+        w = np.sqrt(np.mean(self._loss_history ** 2, axis=1))
+        w = w / w.sum()
+        w = (1.0 - self.uniform_prob) * w + self.uniform_prob / self.n_steps
+        return w
+
+    def sample(self, batch_size, device):
+        p = self.weights()
+        p_t = torch.from_numpy(p).to(device=device, dtype=torch.float32)
+        t = torch.multinomial(p_t, batch_size, replacement=True)
+        # importance weight = uniform(t) / p(t) = (1/T) / p(t)
+        imp_weights = 1.0 / (self.n_steps * p_t[t])
+        return t, imp_weights
+
+    def update_with_local_losses(self, ts, losses):
+        ts = ts.detach().cpu().numpy()
+        losses = losses.detach().to(torch.float64).cpu().numpy()
+        for t, l in zip(ts, losses):
+            if self._loss_counts[t] == self.history_per_term:
+                self._loss_history[t, :-1] = self._loss_history[t, 1:]
+                self._loss_history[t, -1] = l
+            else:
+                self._loss_history[t, self._loss_counts[t]] = l
+                self._loss_counts[t] += 1
+
 class DenoisingDiffusion(nn.Module):
     def __init__(self, n_steps, device, residual_grad_guidance = False):
         self.n_steps = n_steps
@@ -686,8 +731,17 @@ class DenoisingDiffusion(nn.Module):
                               hf_loss_weight = 0.):
 
         batch_size = len(input)
-        t = torch.randint(0, self.n_steps, size=(batch_size,), device=input.device)
-        
+        # importance-sampling of t (env-gated): draw t from the loss-second-moment
+        # distribution and carry per-sample importance weights to keep the objective unbiased.
+        _imp_sample = os.environ.get('IMPORTANCE_SAMPLE_T', '') == '1'
+        if _imp_sample:
+            if getattr(self, '_t_sampler', None) is None or self._t_sampler.n_steps != self.n_steps:
+                self._t_sampler = LossSecondMomentResampler(self.n_steps)
+            t, _imp_weights = self._t_sampler.sample(batch_size, input.device)
+        else:
+            t = torch.randint(0, self.n_steps, size=(batch_size,), device=input.device)
+            _imp_weights = None
+
         if residual_func.gov_eqs == 'darcy':
             x_0 = input
         if residual_func.gov_eqs == 'mechanics':            
@@ -740,39 +794,49 @@ class DenoisingDiffusion(nn.Module):
             loss = loss * self._dwt_hf_weight(target, hf_loss_weight)
         loss = reduce(loss, 'b ... -> b (...)', 'mean')
         loss = loss * extract(self.diff_dict['p2_loss_weight'], t, loss)
-        loss = loss.mean()
 
-        # adjust data-driven loss term
-        data_loss = c_data * loss
+        # per-sample data loss (shape [b]); kept un-reduced so importance weights apply per sample
+        data_loss_ps = c_data * loss
         # opt14: detached 0-dim tensors instead of .item() — each .item() forces a device
         # sync every iteration on this dispatch-bound workload; callers convert at log freq.
-        data_loss_track = data_loss.detach()
-        loss = data_loss
+        data_loss_track = data_loss_ps.detach().mean()
 
-        # add negative residual log-likelihood, i.e., - log p(r|x_0_pred(x_0))
+        # per-sample negative residual log-likelihood, i.e., - log p(r|x_0_pred(x_0))
         var = extract(self.diff_dict['posterior_variance_clipped'], t, residual)
-        
+
         residual_loss_track = residual.detach().abs().mean()
 
         residual_log_likelihood = self.gaussian_log_likelihood(torch.zeros_like(residual), means=residual, variance=var)
         residual_loss = c_residual * -1. * residual_log_likelihood
-        loss += residual_loss.mean()
+        residual_loss_ps = residual_loss.flatten(1).mean(dim=1) if residual_loss.ndim > 1 else residual_loss
+
+        total_loss_ps = data_loss_ps + residual_loss_ps
 
         ineq_loss_track = 0.
         if return_inequality:
             # add negative inequality residual log-likelihood, i.e., - log p(r_ineq|x_0_pred(x_0)) (similar to above)
             ineq_log_likelihood = self.gaussian_log_likelihood(torch.zeros_like(out_dict['inequality']), means=out_dict['inequality'], variance=var)
             ineq_loss = c_ineq * -1. * ineq_log_likelihood
+            ineq_loss_ps = ineq_loss.flatten(1).mean(dim=1) if ineq_loss.ndim > 1 else ineq_loss
+            total_loss_ps = total_loss_ps + ineq_loss_ps
             ineq_loss_track = out_dict['inequality'].detach().mean()
-            loss += ineq_loss.mean()
 
         opt_loss_track = 0.
         if return_optimizer:
             # add optimization log-likelihood, i.e., log p(c=c_min|x_0_pred(x_0)) (where p is Expon. distribution)
             opt_log_likelihood = -1. * out_dict['optimizer']
             opt_loss = -1. * lambda_opt * opt_log_likelihood
+            opt_loss_ps = opt_loss.flatten(1).mean(dim=1) if opt_loss.ndim > 1 else opt_loss
+            total_loss_ps = total_loss_ps + opt_loss_ps
             opt_loss_track = out_dict['optimizer'].detach().mean()
-            loss += opt_loss.mean()
+
+        # combine: importance-weighted mean keeps the uniform-t objective unbiased; feed the
+        # per-sample loss back to the resampler for its second-moment estimate.
+        if _imp_weights is not None:
+            loss = (_imp_weights * total_loss_ps).mean()
+            self._t_sampler.update_with_local_losses(t, total_loss_ps.detach())
+        else:
+            loss = total_loss_ps.mean()
 
         return loss, data_loss_track, residual_loss_track, ineq_loss_track, opt_loss_track
     

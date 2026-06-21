@@ -449,11 +449,17 @@ def train(overrides=None, trial=None):
         # config in the run), so set it explicitly via config.update on the resolved params:
         # p (run/hyperparams) + config (yaml-sourced, with the actually-used c_residual etc.)
         # + derived values. Also mirror the key tunables into summary as a recovery backstop.
+        # env-gated optimization / experiment flags are not in p/config — capture them explicitly
+        # so the run records exactly which code paths were active.
+        env_flags = {f'env/{k}': os.environ.get(k, '') for k in
+                     ('IMPORTANCE_SAMPLE_T', 'OPT12_BF16', 'OPT15_COMPILE_FD', 'OPT16_MATRIX_FREE')}
         full_hparams = {**p, **config,
                         'train_batch_size': train_batch_size,
                         'train_iterations_resolved': train_iterations,
                         'model_dim_resolved': model_dim,
-                        'num_params': num_params}
+                        'num_params': num_params,
+                        'importance_sample_t': os.environ.get('IMPORTANCE_SAMPLE_T', '') == '1',
+                        **env_flags}
         wandb.config.update(full_hparams, allow_val_change=True)   # often empty in this env...
         for _k, _v in full_hparams.items():                        # ...so summary is the reliable store
             try:
@@ -522,6 +528,24 @@ def train(overrides=None, trial=None):
     elif p['sample_eval_freq']:
         print('[sample-eval] only implemented for gov_eqs=="darcy"; disabled')
 
+    # sliced-Wasserstein co-metric for mechanics — same construction as the Darcy swd_fn above
+    # (fixed projections + fixed reference quantiles), comparing the distribution of generated
+    # x_0 fields (disp_x, disp_y, density) against the training set. Logged as 'swd_samples'
+    # alongside residual_mean_abs_samples in the periodic mechanics sampler (Goodhart guard).
+    mech_swd_fn = None
+    if gov_eqs == 'mechanics':
+        _n_ref = min(1024, len(ds))
+        _ref_batch = next(iter(DataLoader(ds, batch_size=_n_ref, shuffle=True))).to(device)
+        _, _ref_x0, _ = torch.tensor_split(_ref_batch, (3, 6), dim=1)   # (N, 3, 65, 65) = generated channels
+        _ref_flat = _ref_x0.flatten(1).float()
+        _swd_gen_m = torch.Generator().manual_seed(0)                    # decoupled from training RNG
+        _swd_proj_m = F.normalize(torch.randn(128, _ref_flat.shape[1], generator=_swd_gen_m), dim=1).to(device)
+        _swd_qlev_m = torch.linspace(0., 1., 128, device=device)
+        _ref_q_m = torch.quantile(_ref_flat @ _swd_proj_m.t(), _swd_qlev_m, dim=0)
+        def mech_swd_fn(gen_flat):
+            gen_q = torch.quantile(gen_flat.float() @ _swd_proj_m.t(), _swd_qlev_m, dim=0)
+            return float((gen_q - _ref_q_m).abs().mean())
+
     def sample_and_checkpoint(iteration):
         """Heavy periodic sampler + checkpoint. Synchronous & EMA-swapped on the training
         model (only at sample_freq cadence). Unchanged from the original sample block."""
@@ -568,6 +592,7 @@ def train(overrides=None, trial=None):
         os.makedirs(output_save_dir_step, exist_ok=True)
 
         labels = ['sample', 'model_output']
+        swd_val = None
         for seq_idx, seq in enumerate(seqs):
 
             # NOTE: We here only evaluate the sample at the final timestep and skip model_output as this is identical (since no noise is applied in last step).
@@ -580,6 +605,12 @@ def train(overrides=None, trial=None):
                 seq = seq.squeeze(-3)
 
             last_preds = seq[-1].numpy()
+            # sliced-Wasserstein distance of the generated x_0 fields vs the training distribution
+            if mech_swd_fn is not None:
+                try:
+                    swd_val = mech_swd_fn(seq[-1].reshape(seq[-1].shape[0], -1).to(device))
+                except Exception as _e:
+                    print(f'[swd] skipped: {_e}')
             sel_samples = np.arange(len(last_preds))
             channels = np.arange(output_dim)
 
@@ -619,6 +650,9 @@ def train(overrides=None, trial=None):
             # logging
             log_fn({'residual_mean_abs_samples': np.nanmean(residuals_array)}, step=iteration)
             log_fn({'residual_median_abs_samples': np.nanmedian(residuals_array)}, step=iteration)
+            if swd_val is not None:
+                log_fn({'swd_samples': swd_val}, step=iteration)
+                print(f'sample-eval at iteration {iteration}: swd_samples={swd_val:.3e}')
             df_data = {'Sample Index': list(range(no_samples)) + ['Mean'],
                     'Residuals (abs)': list(residuals_array)}
             if return_inequality:
