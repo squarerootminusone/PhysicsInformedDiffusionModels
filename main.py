@@ -444,7 +444,7 @@ def train(overrides=None, trial=None):
 
     if wandb_track:
         import wandb
-        wandb.init(project='pi_diffusion', name=name, tags=p.get('wandb_tags') or None)
+        wandb.init(project=os.environ.get('WANDB_PROJECT', 'pi_diffusion'), name=name, tags=p.get('wandb_tags') or None)
         # Log ALL hyperparameters. `config={...}` passed to init was not persisting (empty
         # config in the run), so set it explicitly via config.update on the resolved params:
         # p (run/hyperparams) + config (yaml-sourced, with the actually-used c_residual etc.)
