@@ -41,6 +41,7 @@ DEFAULTS = dict(
     lr_plateau_threshold=1e-3,  # relative-improvement threshold for "no improvement"
     lr_step_size=40000,         # 'step' schedule: halve LR every this many iterations
     lr_step_gamma=0.5,          # 'step' schedule: LR multiplier at each step
+    lr_step_burnin=0,           # 'step' schedule: hold base LR for this many iters before halving
     lr_min=1e-6,
     lr_window=50,               # rolling average over this many logged-loss samples
     lr_sched_freq=500,          # iterations between scheduler.step(rolling_avg)
@@ -428,9 +429,18 @@ def train(overrides=None, trial=None):
             min_lr=p['lr_min'])
         loss_window = deque(maxlen=p['lr_window'])
     elif p['lr_schedule'] == 'step':
-        # fixed schedule: LR *= lr_step_gamma every lr_step_size iterations (stepped once per iter)
-        scheduler = torch.optim.lr_scheduler.StepLR(
-            optimizer, step_size=p['lr_step_size'], gamma=p['lr_step_gamma'])
+        # fixed schedule: LR *= lr_step_gamma every lr_step_size iterations (stepped once per iter).
+        # With lr_step_burnin>0: hold base LR for the first burnin iters, then start halving (first
+        # decay AT iter==burnin, then every lr_step_size).
+        _burnin = p['lr_step_burnin']
+        if _burnin > 0:
+            _ss, _g = p['lr_step_size'], p['lr_step_gamma']
+            scheduler = torch.optim.lr_scheduler.LambdaLR(
+                optimizer,
+                lr_lambda=lambda it: 1.0 if it < _burnin else _g ** (1 + (it - _burnin) // _ss))
+        else:
+            scheduler = torch.optim.lr_scheduler.StepLR(
+                optimizer, step_size=p['lr_step_size'], gamma=p['lr_step_gamma'])
 
     if wandb_track:
         import wandb
