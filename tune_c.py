@@ -46,14 +46,22 @@ def build_objective(args):
             name=f'optuna-c_{args.tag}_t{trial.number}',
             config_path=args.config,
             wandb_track=True,
+            wandb_tags=[args.tag],          # group the whole sweep under one tag for plotting
             async_eval=True,
             bf16_train=True,
+            compile_mode='reduce-overhead',
             train_iterations=args.iters,
             sample_freq=10 ** 9,
             final_sample=False,
             test_eval_freq=500,
             sample_eval_freq=5000,
             c_residual=c_res,
+            # --- B0 recipe (linear attention; full_spatial_attn defaults False) ---
+            model_dim=args.model_dim,
+            diff_steps=args.diff_steps,
+            lr_schedule=args.lr_schedule,
+            lr_step_size=args.lr_step_size,
+            lr_step_gamma=0.5,
         )
         return run_trial_subprocess(overrides)
 
@@ -69,6 +77,11 @@ def main():
     ap.add_argument('--storage', default='sqlite:///pidm_optuna.db')
     ap.add_argument('--n-trials', type=int, default=5)
     ap.add_argument('--iters', type=int, default=35000)
+    # B0 recipe knobs (defaults reproduce the B0 best-recipe config; linear attention)
+    ap.add_argument('--model-dim', type=int, default=64)
+    ap.add_argument('--diff-steps', type=int, default=50)
+    ap.add_argument('--lr-schedule', default='step')
+    ap.add_argument('--lr-step-size', type=int, default=40000)
     args = ap.parse_args()
 
     study = optuna.create_study(
