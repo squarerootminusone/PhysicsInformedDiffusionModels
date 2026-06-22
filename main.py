@@ -131,7 +131,7 @@ class AsyncEvaluator:
                     with torch.autocast(device_type='cuda', enabled=False):
                         loss_test, data_loss_test, residual_loss_test, _, _ = \
                             self.diffusion.model_estimation_loss(
-                                batch, residual_func=self.eval_residuals, **self.loss_kwargs)
+                                batch, residual_func=self.eval_residuals, allow_importance=False, **self.loss_kwargs)
                 if self.stream is not None:
                     self.stream.synchronize()
                 residual_loss_test = float(residual_loss_test)
@@ -789,7 +789,7 @@ def train(overrides=None, trial=None):
                     # NOTE: no torch.no_grad() since residual gradient may be needed for classifier-free guidance
                     loss_test, data_loss_test, residual_loss_test, ineq_loss_test, opt_loss_test = \
                         diffusion_utils.model_estimation_loss(
-                            cur_test_batch, residual_func=residuals, **loss_kwargs)
+                            cur_test_batch, residual_func=residuals, allow_importance=False, **loss_kwargs)
                     print(f'test loss at iteration {iteration}: {loss_test:.3e}')
                     log_fn({'loss_test': loss_test.item(),
                             'loss_data_test': float(data_loss_test),

@@ -728,12 +728,15 @@ class DenoisingDiffusion(nn.Module):
                               c_residual = 0.,
                               c_ineq = 0.,
                               lambda_opt = 0.,
-                              hf_loss_weight = 0.):
+                              hf_loss_weight = 0.,
+                              allow_importance = True):
 
         batch_size = len(input)
-        # importance-sampling of t (env-gated): draw t from the loss-second-moment
+        # importance-sampling of t (env-gated, TRAINING ONLY): draw t from the loss-second-moment
         # distribution and carry per-sample importance weights to keep the objective unbiased.
-        _imp_sample = os.environ.get('IMPORTANCE_SAMPLE_T', '') == '1'
+        # allow_importance=False (eval/test) keeps uniform t so loss_test stays a clean, comparable
+        # metric and eval batches don't pollute the resampler history.
+        _imp_sample = allow_importance and os.environ.get('IMPORTANCE_SAMPLE_T', '') == '1'
         if _imp_sample:
             if getattr(self, '_t_sampler', None) is None or self._t_sampler.n_steps != self.n_steps:
                 self._t_sampler = LossSecondMomentResampler(self.n_steps)
