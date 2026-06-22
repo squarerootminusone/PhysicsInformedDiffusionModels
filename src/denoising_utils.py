@@ -352,7 +352,7 @@ class LossSecondMomentResampler:
     w(t) = (1/T) / p(t) so the estimator of the *uniform-t* objective stays unbiased
     (the model sees the same loss in expectation; only the gradient variance drops).
     Falls back to uniform sampling until every t has `history_per_term` observations."""
-    def __init__(self, n_steps, history_per_term=10, uniform_prob=0.001):
+    def __init__(self, n_steps, history_per_term=10, uniform_prob=0.2):
         self.n_steps = n_steps
         self.history_per_term = history_per_term
         self.uniform_prob = uniform_prob
@@ -363,10 +363,14 @@ class LossSecondMomentResampler:
         return bool((self._loss_counts == self.history_per_term).all())
 
     def weights(self):
+        uniform = np.ones([self.n_steps], dtype=np.float64) / self.n_steps
         if not self._warmed_up():
-            return np.ones([self.n_steps], dtype=np.float64) / self.n_steps
+            return uniform
         w = np.sqrt(np.mean(self._loss_history ** 2, axis=1))
-        w = w / w.sum()
+        s = w.sum()
+        if not np.isfinite(s) or s <= 0:  # all-zero / non-finite history -> fall back to uniform
+            return uniform
+        w = w / s
         w = (1.0 - self.uniform_prob) * w + self.uniform_prob / self.n_steps
         return w
 
@@ -382,6 +386,8 @@ class LossSecondMomentResampler:
         ts = ts.detach().cpu().numpy()
         losses = losses.detach().to(torch.float64).cpu().numpy()
         for t, l in zip(ts, losses):
+            if not np.isfinite(l):   # never poison the second-moment history with NaN/Inf
+                continue
             if self._loss_counts[t] == self.history_per_term:
                 self._loss_history[t, :-1] = self._loss_history[t, 1:]
                 self._loss_history[t, -1] = l
@@ -739,7 +745,10 @@ class DenoisingDiffusion(nn.Module):
         _imp_sample = allow_importance and os.environ.get('IMPORTANCE_SAMPLE_T', '') == '1'
         if _imp_sample:
             if getattr(self, '_t_sampler', None) is None or self._t_sampler.n_steps != self.n_steps:
-                self._t_sampler = LossSecondMomentResampler(self.n_steps)
+                # uniform_prob floor caps the max importance weight at ~1/(uniform_prob); 0.2 keeps
+                # weights <= ~5x (safe for small batches) while still tilting toward high-loss t.
+                self._t_sampler = LossSecondMomentResampler(
+                    self.n_steps, uniform_prob=float(os.environ.get('IMPORTANCE_UNIFORM_PROB', '0.2')))
             t, _imp_weights = self._t_sampler.sample(batch_size, input.device)
         else:
             t = torch.randint(0, self.n_steps, size=(batch_size,), device=input.device)

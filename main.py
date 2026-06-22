@@ -469,7 +469,7 @@ def train(overrides=None, trial=None):
         # env-gated optimization / experiment flags are not in p/config — capture them explicitly
         # so the run records exactly which code paths were active.
         env_flags = {f'env/{k}': os.environ.get(k, '') for k in
-                     ('IMPORTANCE_SAMPLE_T', 'OPT12_BF16', 'OPT15_COMPILE_FD', 'OPT16_MATRIX_FREE')}
+                     ('IMPORTANCE_SAMPLE_T', 'IMPORTANCE_UNIFORM_PROB', 'OPT12_BF16', 'OPT15_COMPILE_FD', 'OPT16_MATRIX_FREE')}
         full_hparams = {**p, **config,
                         'train_batch_size': train_batch_size,
                         'train_iterations_resolved': train_iterations,
