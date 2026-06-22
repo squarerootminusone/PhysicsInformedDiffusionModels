@@ -56,6 +56,9 @@ DEFAULTS = dict(
     fd_acc=None,                # None -> from yaml config
     model_dim=None,             # None -> per-gov_eqs default (darcy 32 / mechanics 128)
     full_spatial_attn=False,    # per-level full quadratic spatial attention (vs linear SpatialLinearAttention)
+    N_correction=None,          # per-run override of sampling-time residual correction (None -> yaml)
+    M_correction=None,          # per-run override (post-hoc correction steps)
+    correction_mode=None,       # per-run override ('xt' | 'x0')
     wandb_tags=None,            # optional list of wandb tags (e.g. for grouping a sweep in plots)
     batch_size=None,            # None -> per-gov_eqs default
     batch_schedule=None,        # optional {iter: batch_size} ramp (e.g. {0:64, 22000:128, 35000:256})
@@ -291,9 +294,10 @@ def train(overrides=None, trial=None):
         use_ddim_x0 = True
     ddim_steps = config['ddim_steps']
     residual_grad_guidance = config['residual_grad_guidance']
-    correction_mode = config['correction_mode']
-    M_correction = config['M_correction']
-    N_correction = config['N_correction']
+    # correction knobs: per-run override (p) falls back to the yaml config when None
+    correction_mode = p['correction_mode'] if p.get('correction_mode') is not None else config['correction_mode']
+    M_correction = p['M_correction'] if p.get('M_correction') is not None else config['M_correction']
+    N_correction = p['N_correction'] if p.get('N_correction') is not None else config['N_correction']
     gov_eqs = config['gov_eqs']
     if gov_eqs != 'darcy' and (residual_grad_guidance or N_correction > 0 or M_correction > 0):
         raise ValueError('Gradient guidance and CoCoGen only implemented for Darcy flow study.')
