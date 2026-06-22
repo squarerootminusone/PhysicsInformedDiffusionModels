@@ -325,6 +325,19 @@ def save_model(config, model, train_iterations, output_save_dir):
         torch.save(save_obj, f)
     print(f'\ncheckpoint saved to {output_save_dir}/.')
 
+def save_ema_checkpoint(config, ema, iteration, output_save_dir):
+    """Lightweight periodic checkpoint: save the EMA shadow weights directly, WITHOUT swapping
+    them into the (compiled) training model or running the sampler — avoids the cudagraph
+    EMA-swap crash and the heavy synchronous sample. Keys keep the '_orig_mod.' prefix; loaders
+    already strip it. Matches save_model's on-disk format ({'model': state_dict})."""
+    os.makedirs(Path(output_save_dir, 'model/'), exist_ok=True)
+    with open(output_save_dir + '/model/model.yaml', 'w') as yaml_file:
+        yaml.dump(dict(config), yaml_file, default_flow_style=False)
+    save_dir_model = output_save_dir + '/model/checkpoint_' + str(iteration) + '.pt'
+    with open(save_dir_model, 'wb') as f:
+        torch.save(dict(model={k: v.detach().cpu() for k, v in ema.shadow.items()}), f)
+    print(f'\nEMA checkpoint saved: {save_dir_model}', flush=True)
+
 def load_model(path, model, strict = True):
 
     # to avoid extra GPU memory usage in main process when using Accelerate

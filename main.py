@@ -70,6 +70,7 @@ DEFAULTS = dict(
     sample_freq=20000,          # HPO: set >= train_iterations to skip the heavy GPU sampler
     final_sample=True,          # run one sample+checkpoint at the last iteration (HPO: False)
     save_final_checkpoint=False, # save the final EMA model checkpoint (for later fp64 eval / reuse)
+    ckpt_freq=None,             # if set, save an EMA checkpoint every N iters (keep all, not just final)
     sample_eval_freq=None,      # if set, async p_sample_loop residual_mean_abs_samples every N steps
     ema_start=1000,
 )
@@ -765,6 +766,12 @@ def train(overrides=None, trial=None):
             # ema update
             if iteration > ema_start:
                 ema.update(model)
+
+            # lightweight periodic EMA checkpoint (every ckpt_freq iters) — saves EMA weights to
+            # disk without swapping the compiled model or sampling (so all checkpoints are kept,
+            # not just the final one, and the best can be picked post-hoc)
+            if p['ckpt_freq'] and iteration > 0 and iteration % p['ckpt_freq'] == 0:
+                save_ema_checkpoint(config, ema, iteration, output_save_dir)
 
             # drain async eval results in the MAIN thread (all wandb/best handled here, not in workers)
             if evaluator is not None:
