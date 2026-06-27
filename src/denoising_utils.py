@@ -748,6 +748,7 @@ class DenoisingDiffusion(nn.Module):
                               c_ineq = 0.,
                               lambda_opt = 0.,
                               hf_loss_weight = 0.,
+                              c_amp = 0.,
                               allow_importance = True):
 
         batch_size = len(input)
@@ -837,6 +838,18 @@ class DenoisingDiffusion(nn.Module):
         residual_loss_ps = residual_loss.flatten(1).mean(dim=1) if residual_loss.ndim > 1 else residual_loss
 
         total_loss_ps = data_loss_ps + residual_loss_ps
+
+        # amplitude-matching co-loss (anti-collapse): the PDE residual is linear in the fields, so the
+        # model can cheat it by shrinking field amplitude (esp. pressure). Penalise per-sample,
+        # per-channel std mismatch between the x0-prediction and the true field to keep amplitudes
+        # honest. Use the *relative* std error so the low-amplitude pressure channel isn't drowned by
+        # the high-amplitude K channel (the same weighting bug that hid the collapse in the raw SWD).
+        # c_amp=0 -> exact original objective.
+        if c_amp > 0. and output.ndim == 4:
+            gen_std = output.flatten(2).std(dim=2)   # (b, c)
+            tgt_std = target.flatten(2).std(dim=2)   # (b, c)
+            rel = gen_std / (tgt_std + 1e-8) - 1.     # (b, c): per-channel relative std error
+            total_loss_ps = total_loss_ps + c_amp * (rel ** 2).mean(dim=1)
 
         ineq_loss_track = 0.
         if return_inequality:

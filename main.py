@@ -52,6 +52,7 @@ DEFAULTS = dict(
     c_data=None,                # None -> from yaml config
     c_residual=None,            # None -> from yaml config
     hf_loss_weight=0.,          # B2: Haar-DWT high-frequency upweighting of the data loss (0 = off)
+    c_amp=0.,                   # anti-collapse: per-channel std-match co-loss weight (0 = off)
     diff_steps=None,            # None -> from yaml config
     fd_acc=None,                # None -> from yaml config
     model_dim=None,             # None -> per-gov_eqs default (darcy 32 / mechanics 128)
@@ -509,7 +510,7 @@ def train(overrides=None, trial=None):
     os.makedirs(output_save_dir, exist_ok=True)
 
     loss_kwargs = dict(c_data=c_data, c_residual=c_residual, c_ineq=c_ineq, lambda_opt=lambda_opt,
-                       hf_loss_weight=p['hf_loss_weight'])
+                       hf_loss_weight=p['hf_loss_weight'], c_amp=p['c_amp'])
 
     # --- async validation evaluator (separate uncompiled model copy + its own CUDA stream) ---
     evaluator = None
