@@ -848,8 +848,11 @@ class DenoisingDiffusion(nn.Module):
         if c_amp > 0. and output.ndim == 4:
             gen_std = output.flatten(2).std(dim=2)   # (b, c)
             tgt_std = target.flatten(2).std(dim=2)   # (b, c)
-            rel = gen_std / (tgt_std + 1e-8) - 1.     # (b, c): per-channel relative std error
-            total_loss_ps = total_loss_ps + c_amp * (rel ** 2).mean(dim=1)
+            # one-sided, bounded: penalise only *under*-amplitude (collapse). The relative shortfall
+            # (tgt-gen)/tgt is clamped to [0,1] so the early untrained phase (gen_std >> tgt_std,
+            # handled by the data MSE) never explodes the loss, and the term can't dominate.
+            shortfall = ((tgt_std - gen_std) / (tgt_std + 1e-8)).clamp(0., 1.)   # (b, c)
+            total_loss_ps = total_loss_ps + c_amp * (shortfall ** 2).mean(dim=1)
 
         ineq_loss_track = 0.
         if return_inequality:
