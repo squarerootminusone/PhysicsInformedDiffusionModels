@@ -532,14 +532,23 @@ def train(overrides=None, trial=None):
         # sliced-Wasserstein co-metric vs the training distribution (fixed projections, fixed ref
         # quantiles — same construction as tune_corrections.py). Detects samples leaving the data
         # manifold while the residual improves (Goodhart guard).
-        _swd_ref = next(iter(DataLoader(ds, batch_size=min(1024, len(ds)), shuffle=True))) \
-            .to(device).flatten(1)
+        _swd_ref_img = next(iter(DataLoader(ds, batch_size=min(1024, len(ds)), shuffle=True))).to(device)
+        # per-channel standardisation: the raw SWD is amplitude-weighted, so the high-magnitude K
+        # channel (std ~1.3) dominates the random projections and a *pressure*-amplitude collapse
+        # (the residual is linear in p, so shrinking p cheats the residual) stays nearly invisible.
+        # z-score each channel to unit variance using data stats so both fields weigh equally.
+        _ch_mu = _swd_ref_img.mean(dim=(0, 2, 3), keepdim=True)
+        _ch_sd = _swd_ref_img.std(dim=(0, 2, 3), keepdim=True).clamp_min(1e-8)
+        _swd_zmu = _ch_mu.expand(1, *_swd_ref_img.shape[1:]).flatten()   # (C*H*W,)
+        _swd_zsd = _ch_sd.expand(1, *_swd_ref_img.shape[1:]).flatten()
+        _swd_ref = (_swd_ref_img.flatten(1) - _swd_zmu) / _swd_zsd
         _swd_gen = torch.Generator().manual_seed(0)   # decoupled from training RNG
         _swd_proj = F.normalize(torch.randn(128, _swd_ref.shape[1], generator=_swd_gen), dim=1).to(device)
         _swd_qlev = torch.linspace(0., 1., 128, device=device)
         _swd_ref_q = torch.quantile(_swd_ref @ _swd_proj.t(), _swd_qlev, dim=0)
 
         def swd_fn(gen_flat):
+            gen_flat = (gen_flat - _swd_zmu) / _swd_zsd   # same per-channel z-score as the reference
             gen_q = torch.quantile(gen_flat @ _swd_proj.t(), _swd_qlev, dim=0)
             return float((gen_q - _swd_ref_q).abs().mean())
 
@@ -559,13 +568,21 @@ def train(overrides=None, trial=None):
         _n_ref = min(1024, len(ds))
         _ref_batch = next(iter(DataLoader(ds, batch_size=_n_ref, shuffle=True))).to(device)
         _, _ref_x0, _ = torch.tensor_split(_ref_batch, (3, 6), dim=1)   # (N, 3, 65, 65) = generated channels
-        _ref_flat = _ref_x0.flatten(1).float()
+        _ref_x0 = _ref_x0.float()
+        # per-channel standardisation (see Darcy swd_fn): keep the disp/density channels on equal
+        # footing so one high-amplitude field can't dominate the projection and mask a collapse.
+        _ch_mu_m = _ref_x0.mean(dim=(0, 2, 3), keepdim=True)
+        _ch_sd_m = _ref_x0.std(dim=(0, 2, 3), keepdim=True).clamp_min(1e-8)
+        _swd_zmu_m = _ch_mu_m.expand(1, *_ref_x0.shape[1:]).flatten()
+        _swd_zsd_m = _ch_sd_m.expand(1, *_ref_x0.shape[1:]).flatten()
+        _ref_flat = (_ref_x0.flatten(1) - _swd_zmu_m) / _swd_zsd_m
         _swd_gen_m = torch.Generator().manual_seed(0)                    # decoupled from training RNG
         _swd_proj_m = F.normalize(torch.randn(128, _ref_flat.shape[1], generator=_swd_gen_m), dim=1).to(device)
         _swd_qlev_m = torch.linspace(0., 1., 128, device=device)
         _ref_q_m = torch.quantile(_ref_flat @ _swd_proj_m.t(), _swd_qlev_m, dim=0)
         def mech_swd_fn(gen_flat):
-            gen_q = torch.quantile(gen_flat.float() @ _swd_proj_m.t(), _swd_qlev_m, dim=0)
+            gen_flat = (gen_flat.float() - _swd_zmu_m) / _swd_zsd_m       # same per-channel z-score
+            gen_q = torch.quantile(gen_flat @ _swd_proj_m.t(), _swd_qlev_m, dim=0)
             return float((gen_q - _ref_q_m).abs().mean())
 
     def sample_and_checkpoint(iteration):
